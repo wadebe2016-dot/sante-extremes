@@ -1,0 +1,58 @@
+###############################################################################
+# Santé des extrêmes — LOT 2 : exemple de configuration Terraform
+#
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# terraform.tfvars n'est PAS versionné. Aucune valeur secrète n'y figure :
+# le mot de passe admin est généré par Terraform puis conservé dans AWS
+# Secrets Manager, et la CI s'authentifie par OIDC (aucune clé d'accès).
+###############################################################################
+
+# --- Identité ----------------------------------------------------------------
+project_name = "sde"
+environment  = "prod"
+aws_region   = "eu-west-3" # Paris
+
+# --- Domaines (zone hébergée chez Cloudflare) --------------------------------
+domain_name   = "atlastech.cm"
+api_subdomain = "sde-api" # → sde-api.atlastech.cm (ALB)
+cdn_subdomain = "sde-cdn" # → sde-cdn.atlastech.cm (CloudFront)
+
+# --- Dimensionnement du conteneur -------------------------------------------
+# 0,5 vCPU / 1 Gio : largement suffisant pour l'API de cotisations.
+task_cpu    = 512
+task_memory = 1024
+
+# Passer à "ARM64" fait baisser la facture Fargate d'environ 20 %.
+# Construire alors l'image en conséquence :
+#   ./scripts/deploy.sh --platform linux/arm64
+cpu_architecture = "X86_64"
+
+# --- Persistance SQLite sur S3 ----------------------------------------------
+db_object_key            = "sqlite/sde.db"
+db_sync_interval_seconds = 300 # sauvegarde toutes les 5 min + à l'arrêt
+db_backup_retention_days = 90
+
+# --- Journalisation ----------------------------------------------------------
+log_retention_days        = 30
+enable_alb_access_logs    = false # à activer si un audit des accès est requis
+enable_container_insights = false # métriques détaillées ECS (facturées)
+
+# --- Intégration continue ----------------------------------------------------
+github_repository           = "Wadebe/sante-extremes"
+create_github_oidc_provider = true # false si le fournisseur existe déjà
+
+# --- Garde-fous --------------------------------------------------------------
+enable_deletion_protection = true
+
+# --- Optionnel ---------------------------------------------------------------
+# Restreindre l'accès à l'API (défaut : ouvert à tous)
+# allowed_ingress_cidrs = ["41.202.0.0/16"]
+
+# Restreindre les origines navigateur du tableau public
+# cors_allowed_origins = ["https://sde.atlastech.cm"]
+
+# extra_tags = {
+#   Owner      = "sante-des-extremes"
+#   CostCenter = "association"
+# }

@@ -1,0 +1,46 @@
+# Dépendances
+node_modules/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Base de données SQLite
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+backend/data/
+
+# Build mobile
+mobile/.expo/
+mobile/dist/
+mobile/android/
+mobile/ios/
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# Terraform — .terraform.lock.hcl EST versionné (verrouillage des fournisseurs)
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+terraform.tfvars
+*.auto.tfvars
+!terraform.tfvars.example
+
+# Journaux et divers
+*.log
+npm-debug.log*
+yarn-error.log*
+.DS_Store
+Thumbs.db
+
+# Éditeurs
+.idea/
+.vscode/

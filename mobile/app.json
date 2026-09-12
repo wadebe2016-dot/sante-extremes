@@ -1,0 +1,42 @@
+{
+  "expo": {
+    "name": "Santé des extrêmes",
+    "slug": "sde-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/logo.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/logo.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0B6E4F"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "extra": {
+      "apiUrl": "https://sde-api.atlastech.cm/api",
+      "mediaUrl": "https://sde-cdn.atlastech.cm"
+    },
+    "android": {
+      "package": "com.santedesextremes.sdeapp",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/logo.png",
+        "backgroundColor": "#0B6E4F"
+      },
+      "permissions": ["CAMERA", "READ_EXTERNAL_STORAGE", "WRITE_EXTERNAL_STORAGE"]
+    },
+    "ios": {
+      "bundleIdentifier": "com.santedesextremes.sdeapp",
+      "supportsTablet": true
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "L'application accède à vos photos pour joindre le justificatif de paiement.",
+          "cameraPermission": "L'application accède à la caméra pour photographier le justificatif de paiement."
+        }
+      ]
+    ]
+  }
+}
