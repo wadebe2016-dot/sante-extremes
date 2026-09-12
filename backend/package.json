@@ -1,0 +1,23 @@
+{
+  "name": "sante-extremes-backend",
+  "version": "1.0.0",
+  "description": "Backend de gestion des cotisations — Santé des extrêmes (LOT 1)",
+  "main": "src/index.js",
+  "private": true,
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "migrate": "node src/db.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.658.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "multer": "^2.0.2",
+    "sqlite3": "^5.1.7"
+  }
+}

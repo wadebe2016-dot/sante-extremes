@@ -1,0 +1,35 @@
+# Dépendances
+node_modules/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Base de données SQLite
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+backend/data/
+
+# Build mobile
+mobile/.expo/
+mobile/dist/
+mobile/android/
+mobile/ios/
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# Journaux et divers
+*.log
+npm-debug.log*
+yarn-error.log*
+.DS_Store
+Thumbs.db
+
+# Éditeurs
+.idea/
+.vscode/

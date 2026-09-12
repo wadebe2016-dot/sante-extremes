@@ -1,0 +1,27 @@
+# Dépendances
+node_modules/
+
+# Expo
+.expo/
+.expo-shared/
+dist/
+web-build/
+
+# Projets natifs générés par prebuild / eas build --local
+android/
+ios/
+
+# Artefacts de build
+*.apk
+*.aab
+*.jks
+*.keystore
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Système
+*.log
+.DS_Store

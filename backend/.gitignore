@@ -1,0 +1,19 @@
+# Dépendances
+node_modules/
+
+# Secrets et configuration locale
+.env
+.env.*
+!.env.example
+
+# Base SQLite et données locales
+data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Journaux
+logs/
+*.log
+npm-debug.log*
