@@ -13,7 +13,8 @@
     },
     "assetBundlePatterns": ["**/*"],
     "extra": {
-      "apiUrl": "http://10.0.2.2:3000"
+      "apiUrl": "https://sde-api.atlastech.cm/api",
+      "mediaUrl": "https://sde-cdn.atlastech.cm"
     },
     "android": {
       "package": "com.santedesextremes.sdeapp",

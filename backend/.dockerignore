@@ -1,0 +1,27 @@
+# Contexte de build minimal : accélère l'envoi au démon et évite de faire
+# fuiter des données locales dans l'image.
+
+node_modules
+npm-debug.log*
+
+# Secrets et configuration locale
+.env
+.env.*
+!.env.example
+
+# Base et données locales
+data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.xlsx
+
+# Outils et documentation hors image
+import_cotisations.py
+IMPORT_DONNEES.md
+*.md
+.git
+.gitignore
+Dockerfile
+.dockerignore

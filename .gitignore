@@ -23,6 +23,17 @@ mobile/ios/
 *.keystore
 *.jks
 
+# Terraform — .terraform.lock.hcl EST versionné (verrouillage des fournisseurs)
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+terraform.tfvars
+*.auto.tfvars
+!terraform.tfvars.example
+
 # Journaux et divers
 *.log
 npm-debug.log*

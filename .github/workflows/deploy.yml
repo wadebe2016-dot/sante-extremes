@@ -1,0 +1,337 @@
+###############################################################################
+# Santé des extrêmes — LOT 2 : intégration et déploiement continus
+#
+# Chaîne : vérification → image Docker poussée sur ECR → déploiement ECS → test
+# de bon fonctionnement sur https://sde-api.atlastech.cm/api/health.
+#
+# Aucune clé AWS n'est stockée dans GitHub : le job assume le rôle IAM
+# sde-prod-github-deploy par OIDC (secret AWS_DEPLOY_ROLE_ARN = simple ARN).
+#
+# Variables de dépôt attendues (Settings ▸ Actions ▸ Variables) — toutes ont
+# une valeur de repli correspondant au Terraform livré :
+#   AWS_REGION, ECR_REPOSITORY, ECS_CLUSTER, ECS_SERVICE, ECS_TASK_FAMILY,
+#   API_BASE_URL
+# Secret attendu : AWS_DEPLOY_ROLE_ARN (sortie Terraform github_deploy_role_arn)
+###############################################################################
+name: Déploiement backend (ECS Fargate)
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/deploy.yml'
+  pull_request:
+    paths:
+      - 'backend/**'
+      - 'terraform/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+    inputs:
+      forcer_deploiement:
+        description: "Déployer même sans changement backend"
+        type: boolean
+        default: true
+      terraform_plan:
+        description: "Exécuter un terraform plan (lecture seule)"
+        type: boolean
+        default: false
+
+# Le service ne tourne qu'avec UNE tâche (SQLite mono-écrivain) : deux
+# déploiements simultanés se marcheraient dessus. La file d'attente est donc
+# sérialisée, sans annulation du déploiement en cours.
+concurrency:
+  group: deploiement-backend-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-3' }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'sde-prod-backend' }}
+  ECS_CLUSTER: ${{ vars.ECS_CLUSTER || 'sde-prod-cluster' }}
+  ECS_SERVICE: ${{ vars.ECS_SERVICE || 'sde-prod-backend' }}
+  ECS_TASK_FAMILY: ${{ vars.ECS_TASK_FAMILY || 'sde-prod-backend' }}
+  CONTAINER_NAME: backend
+  API_BASE_URL: ${{ vars.API_BASE_URL || 'https://sde-api.atlastech.cm' }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Vérifications statiques et démarrage réel du serveur
+  # ---------------------------------------------------------------------------
+  verification:
+    name: Vérification du backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Récupération du dépôt
+        uses: actions/checkout@v4
+
+      - name: Installation de Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Installation des dépendances
+        working-directory: backend
+        run: npm ci --no-audit --no-fund
+
+      - name: Contrôle syntaxique de toutes les sources
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          fichiers=$(find src scripts -name '*.js' -type f | sort)
+          echo "$fichiers" | xargs -r -n1 node --check
+          echo "✓ $(echo "$fichiers" | wc -l) fichier(s) JavaScript valides"
+
+      - name: Validation de l'entrypoint conteneur
+        run: bash -n backend/docker-entrypoint.sh && echo "✓ entrypoint valide"
+
+      - name: Refus des secrets écrits en dur
+        run: |
+          set -euo pipefail
+          motif='(AKIA[0-9A-Z]{16}|aws_secret_access_key\s*=|-----BEGIN [A-Z ]*PRIVATE KEY-----)'
+          if grep -rInE "$motif" backend/src backend/scripts terraform scripts 2>/dev/null; then
+            echo "::error::identifiants en dur détectés"
+            exit 1
+          fi
+          echo "✓ aucun identifiant en dur"
+
+      - name: Démarrage du serveur et sonde de santé
+        working-directory: backend
+        env:
+          NODE_ENV: test
+          PORT: 3000
+          DB_PATH: ./data/ci.db
+          ADMIN_PASSWORD: mot-de-passe-de-test-ci
+        run: |
+          set -euo pipefail
+          node src/index.js & serveur=$!
+          trap 'kill $serveur 2>/dev/null || true' EXIT
+
+          for tentative in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:3000/api/health > /tmp/sante.json; then
+              cat /tmp/sante.json
+              echo "✓ sonde de santé OK (tentative $tentative)"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "::error::le serveur n'a pas répondu sur /api/health"
+          exit 1
+
+  # ---------------------------------------------------------------------------
+  # 2. Construction et publication de l'image sur ECR
+  # ---------------------------------------------------------------------------
+  image:
+    name: Image Docker → ECR
+    needs: verification
+    if: github.event_name == 'push' || github.event.inputs.forcer_deploiement == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    permissions:
+      contents: read
+      id-token: write # nécessaire à l'authentification OIDC
+
+    outputs:
+      image: ${{ steps.reference.outputs.image }}
+
+    steps:
+      - name: Récupération du dépôt
+        uses: actions/checkout@v4
+
+      - name: Authentification AWS par OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: github-deploiement-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Connexion au registre ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Préparation de Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Construction et envoi de l'image
+        id: publication
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/Dockerfile
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Publication de la référence d'image
+        id: reference
+        run: echo "image=${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Récapitulatif
+        run: |
+          {
+            echo "### Image publiée"
+            echo ""
+            echo '```'
+            echo "${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # 3. Déploiement sur ECS Fargate
+  # ---------------------------------------------------------------------------
+  deploiement:
+    name: Déploiement ECS
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: production
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Authentification AWS par OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: github-deploiement-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Récupération de la définition de tâche courante
+        run: |
+          set -euo pipefail
+          aws ecs describe-task-definition \
+            --task-definition "${ECS_TASK_FAMILY}" \
+            --query 'taskDefinition' \
+            --output json > definition-tache.json
+          echo "✓ révision courante : $(jq -r '.revision' definition-tache.json)"
+
+      - name: Mise à jour de l'image dans la définition
+        id: rendu
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: definition-tache.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ needs.image.outputs.image }}
+
+      # Le service passe en minimumHealthyPercent=0 / maximumPercent=100 :
+      # l'ancienne tâche est arrêtée (sauvegarde SQLite finale vers S3) avant
+      # que la nouvelle démarre et restaure la base. Brève coupure assumée.
+      - name: Déploiement et attente de stabilité
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.rendu.outputs.task-definition }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          service: ${{ env.ECS_SERVICE }}
+          wait-for-service-stability: true
+          wait-for-minutes: 15
+
+      - name: Test de bon fonctionnement en production
+        run: |
+          set -euo pipefail
+          for tentative in $(seq 1 15); do
+            code=$(curl -s -o /tmp/sante.json -w '%{http_code}' "${API_BASE_URL}/api/health" || echo 000)
+            if [ "$code" = "200" ]; then
+              cat /tmp/sante.json
+              echo ""
+              echo "✓ production saine (${API_BASE_URL}/api/health)"
+              exit 0
+            fi
+            echo "tentative ${tentative} : HTTP ${code}, nouvelle vérification dans 10 s"
+            sleep 10
+          done
+          echo "::error::l'API publique ne répond pas 200 après déploiement"
+          exit 1
+
+      - name: Récapitulatif du déploiement
+        if: always()
+        run: |
+          {
+            echo "### Déploiement ${{ job.status }}"
+            echo ""
+            echo "- Image : \`${{ needs.image.outputs.image }}\`"
+            echo "- Service : \`${ECS_SERVICE}\` (cluster \`${ECS_CLUSTER}\`)"
+            echo "- API : ${API_BASE_URL}/api"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # 4. Terraform — format, validation et plan (jamais d'apply automatique)
+  # ---------------------------------------------------------------------------
+  terraform:
+    name: Terraform (validate + plan)
+    if: github.event_name == 'pull_request' || github.event.inputs.terraform_plan == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+      id-token: write
+
+    # Le contexte « secrets » n'est pas lisible dans un « if » : on le recopie
+    # en variable d'environnement du job pour pouvoir tester sa présence.
+    env:
+      ROLE_DEPLOIEMENT: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+
+    steps:
+      - name: Récupération du dépôt
+        uses: actions/checkout@v4
+
+      - name: Installation de Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
+      - name: Contrôle de mise en forme
+        working-directory: terraform
+        run: terraform fmt -check -recursive -diff
+
+      - name: Initialisation sans backend distant
+        working-directory: terraform
+        run: terraform init -backend=false
+
+      - name: Validation
+        working-directory: terraform
+        run: terraform validate
+
+      # Le plan n'est tenté que si le rôle de déploiement est disponible ;
+      # sur une PR issue d'un fork, l'OIDC n'est pas accessible.
+      - name: Authentification AWS par OIDC
+        id: aws
+        if: env.ROLE_DEPLOIEMENT != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        continue-on-error: true
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: github-plan-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Plan (lecture seule)
+        if: steps.aws.outcome == 'success'
+        working-directory: terraform
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          terraform init -input=false
+          terraform plan -input=false -no-color -lock=false | tee plan.txt
+          {
+            echo "### Terraform plan"
+            echo '```'
+            tail -c 60000 plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
