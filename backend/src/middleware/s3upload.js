@@ -237,6 +237,45 @@ async function televerserDocument(fichier, type, idMembre = null) {
 }
 
 /**
+ * Téléverse un fichier sous un préfixe libre et renvoie sa clé.
+ *
+ * Sert aux pièces des dépenses — devis et justificatifs de décaissement — qui
+ * ne se rattachent à aucun membre et n'ont donc rien à faire sous
+ * « cotisations/ ». Comme les documents, elles restent privées : seule une URL
+ * pré-signée permet de les lire.
+ *
+ * @param {object} fichier fichier multer en mémoire
+ * @param {string} prefixe préfixe S3, sans barre finale
+ * @returns {Promise<{cle: string, taille: number, nom: string}>}
+ */
+async function televerserFichierPrive(fichier, prefixe) {
+  const bucket = exigerBucket();
+
+  const extension = (path.extname(fichier.originalname || '') || '.bin').toLowerCase();
+  const empreinte = crypto.randomBytes(8).toString('hex');
+  const horodatage = new Date().toISOString().replace(/[:.]/g, '-');
+  const cle = `${prefixe.replace(/\/+$/, '')}/${horodatage}-${empreinte}${extension}`;
+
+  try {
+    await obtenirClientS3().send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: cle,
+        Body: fichier.buffer,
+        ContentType: fichier.mimetype,
+        ContentLength: fichier.size,
+      })
+    );
+  } catch (erreur) {
+    console.error(`[s3] échec du dépôt de ${cle} : ${erreur.message}`);
+    throw new Error("Le fichier n'a pas pu être enregistré sur S3");
+  }
+
+  console.log(`[s3] fichier déposé : ${cle} (${fichier.size} octets)`);
+  return { cle, taille: fichier.size, nom: path.basename(fichier.originalname || 'fichier') };
+}
+
+/**
  * Produit une URL pré-signée de courte durée pour lire un objet privé.
  *
  * L'URL porte les droits de lecture : elle ne doit jamais être journalisée ni
@@ -307,6 +346,7 @@ module.exports = {
   televerserJustificatifDetaille,
   recevoirDocument,
   televerserDocument,
+  televerserFichierPrive,
   urlPresignee,
   supprimerObjet,
   gererErreursUpload,

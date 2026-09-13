@@ -104,6 +104,8 @@ automatiquement au démarrage ; `npm run migrate` sert à initialiser la base sa
 | `TRESORIER_PASSWORD` | Code du rôle trésorier |
 | `SECRETAIRE_PASSWORD` | Code du rôle secrétaire |
 | `CENSEUR_PASSWORD` | Code du rôle censeur |
+| `INTENDANT_PASSWORD` | Code du rôle intendant |
+| `COMPETITIONS_PASSWORD` | Code du rôle compétitions |
 | `S3_MAX_FILE_SIZE` | Taille maximale d'un justificatif, en octets (défaut 5 Mo) |
 | `S3_MAX_DOCUMENT_SIZE` | Taille maximale d'un document, en octets (défaut 10 Mo) |
 | `S3_URL_DUREE_SECONDES` | Validité des URL pré-signées (défaut 600 s) |
@@ -118,11 +120,17 @@ d'environnement est vide n'est jamais accordé.
 
 | Rôle | Droits |
 | --- | --- |
-| Membre (tous) | Consulter État, Historique, Sanctions ; exporter ; lire le règlement intérieur |
-| Trésorier | Enregistrer les cotisations ; encaisser les pénalités |
-| Secrétaire | Ajouter / retirer des membres ; règlement intérieur ; fiches santé |
+| Membre (tous) | Consulter État, Historique, Sanctions, Trésorerie ; déclarer son paiement ; exporter |
+| Trésorier | Cotisations, pénalités ; approuver, refuser et décaisser les demandes |
+| Secrétaire | Membres, règlement intérieur, fiches santé ; exprimer un besoin |
 | Censeur | Infliger, lever et annuler les sanctions |
+| Intendant | Exprimer un besoin de dépense |
+| Compétitions | Exprimer un besoin lié aux compétitions |
 | Admin | Tout ce qui précède |
+
+Les codes font **six chiffres**. Le serveur bloque une IP après **cinq échecs sur quinze minutes**
+(429), sur `/api/auth/verify` comme sur toute route protégée, et journalise chaque échec sans jamais
+écrire le code essayé.
 
 ### API
 
@@ -134,6 +142,8 @@ d'environnement est vide n'est jamais accordé.
 | `GET` | `/api/historique?annee=` | — | 200 · 400 |
 | `GET` | `/api/sanctions?statut=&annee=` | — | 200 · 400 |
 | `GET` | `/api/tresorerie?annee=` | — | 200 · 400 |
+| `GET` | `/api/demandes?statut=&annee=` | — | 200 · 400 |
+| `GET` | `/api/decaissements?annee=` | — | 200 · 400 |
 | `POST` | `/api/cotisations/declarer` | — | 201 · 400 · 404 · 409 · 413 · 429 |
 | `GET` | `/api/export/historique.xlsx?annee=` | — | 200 · 400 |
 | `GET` | `/api/export/historique.pdf?annee=` | — | 200 · 400 |
@@ -151,6 +161,12 @@ d'environnement est vide n'est jamais accordé.
 | `GET` | `/api/documents/fiche-sante/:id` | secrétaire | 200 · 401 · 404 |
 | `POST` | `/api/documents/fiche-sante/:id` | secrétaire | 201 · 400 · 401 · 404 |
 | `DELETE` | `/api/documents/fiche-sante/:id` | secrétaire | 200 · 401 · 404 |
+| `POST` | `/api/demandes` | intendant · secrétaire · compétitions | 201 · 400 · 401 |
+| `DELETE` | `/api/demandes/:id` | rôle demandeur | 200 · 401 · 404 · 409 |
+| `POST` | `/api/demandes/:id/approuver` | trésorier | 200 · 401 · 404 · 409 |
+| `POST` | `/api/demandes/:id/refuser` | trésorier | 200 · 400 · 401 · 404 · 409 |
+| `POST` | `/api/demandes/:id/decaisser` | trésorier | 201 · 400 · 401 · 404 · 409 |
+| `GET` | `/api/decaissements/:id/justificatif` | trésorier · intendant · secrétaire · compétitions | 200 · 401 · 404 |
 | `POST` | `/api/sanctions` | censeur | 201 · 400 · 401 · 404 |
 | `POST` | `/api/sanctions/:id/lever` | censeur | 200 · 400 · 401 · 404 · 409 |
 | `DELETE` | `/api/sanctions/:id` | censeur | 200 · 400 · 401 · 404 · 409 |
@@ -163,14 +179,22 @@ Sert à l'application pour savoir quels onglets déverrouiller, sans exécuter d
 rattrapage, un mois futur est refusé), `fichier` (image, 5 Mo max, **facultatif**).
 
 **`POST /api/cotisations/declarer`** — déclaration par le membre, **publique**. `multipart/form-data` :
-`member_id`, `mois` (`AAAA-MM`), `montant`, `moyen`, `fichier` (image ou PDF, 5 Mo, **obligatoire**).
+`member_id`, `mois` (`AAAA-MM`), `montant`, `moyen`, `fichier` (image ou PDF, 5 Mo) — **obligatoire
+en Mobile Money, facultatif en espèces** : un transfert laisse une trace, une remise de billets non.
 La cotisation naît `en_attente` et ne compte nulle part avant validation par le trésorier.
 Plafond de 10 déclarations par IP et par heure ; 409 si le mois est déjà réglé ou déjà déclaré.
 
 **`GET /api/tresorerie?annee=`** — situation de caisse, **publique** :
-`solde_reel = cotisations validées + pénalités encaissées`, sa composition, le détail de l'exercice,
-la répartition mensuelle et les vingt derniers mouvements. Pénalités dues et déclarations en attente
-figurent à part, comme attendues.
+`solde_reel = cotisations validées + pénalités encaissées − décaissements`, sa composition, le bloc
+« engagé » (demandes approuvées non payées), la répartition des dépenses par catégorie, le détail de
+l'exercice et les vingt derniers mouvements — décaissements en négatif. Pénalités dues et
+déclarations en attente figurent à part, comme attendues.
+
+**Dépenses** — personne ne décaisse sans demande approuvée. Les intendants, le secrétariat et les
+gestionnaires de compétitions expriment le besoin ; le trésorier approuve, refuse, puis décaisse.
+`POST /api/demandes/:id/decaisser` répond 409 hors statut `approuvee`, et une contrainte `UNIQUE`
+interdit de payer deux fois la même demande. **Le trésorier ne peut pas créer de demande** : celui
+qui décide du décaissement ne doit pas être celui qui le demande.
 
 > **Pénalités et cotisations ne se mélangent jamais** — sauf dans `/api/tresorerie`, qui donne
 > la caisse. Le règlement d'une pénalité (`POST /api/penalites/:id/regler`) n'entre ni dans

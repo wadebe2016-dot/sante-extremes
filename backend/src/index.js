@@ -14,6 +14,8 @@ const { migrer, fermerBd } = require('./db');
 const routesAdmin = require('./routes/admin');
 const routesAuth = require('./routes/auth');
 const routesCotisations = require('./routes/cotisations');
+const routesDecaissements = require('./routes/decaissements');
+const routesDemandes = require('./routes/demandes');
 const routesDocuments = require('./routes/documents');
 const routesExport = require('./routes/export');
 const routesHistorique = require('./routes/historique');
@@ -62,6 +64,7 @@ application.get('/api/health', (requete, reponse) => {
 application.use('/api/stats', routesStats);
 application.use('/api/historique', routesHistorique);
 application.use('/api/tresorerie', routesTresorerie);
+application.use('/api/decaissements', routesDecaissements); // lecture publique, justificatif restreint
 application.use('/api/export', routesExport);
 
 // Vérification d'un code de rôle (aucune action métier)
@@ -72,6 +75,7 @@ application.use('/api/admin', routesAdmin); // secrétaire
 application.use('/api/cotisations', routesCotisations); // trésorier
 application.use('/api/penalites', routesPenalites); // trésorier
 application.use('/api/sanctions', routesSanctions); // lecture publique, écriture censeur
+application.use('/api/demandes', routesDemandes); // lecture publique, écriture intendant/secrétaire/compétitions
 application.use('/api/documents', routesDocuments); // règlement public, fiches santé secrétaire
 
 // Route inconnue

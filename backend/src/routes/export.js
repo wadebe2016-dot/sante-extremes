@@ -20,8 +20,9 @@ const express = require('express');
 const ExcelJS = require('exceljs');
 const PDFDocument = require('pdfkit');
 
-const { lireToutes } = require('../db');
+const { lireToutes, lireUne } = require('../db');
 const { construireHistorique, lireAnnee, MOIS } = require('./historique');
+const { CATEGORIES } = require('./demandes');
 
 const routeur = express.Router();
 
@@ -70,6 +71,47 @@ function lireSanctions(annee) {
       ORDER BY m.name COLLATE NOCASE ASC, s.date_sanction ASC`,
     [String(annee)]
   );
+}
+
+const LIBELLE_PAYE_PAR = Object.freeze({
+  caisse: 'Caisse',
+  avance_rembourse: 'Avance remboursée',
+});
+
+/** Dépenses décaissées sur l'année, du plus ancien au plus récent. */
+function lireDepenses(annee) {
+  return lireToutes(
+    `SELECT x.*, d.categorie, d.libelle
+       FROM decaissements x
+       JOIN demandes d ON d.id = x.demande_id
+      WHERE strftime('%Y', x.date_paiement) = ?
+      ORDER BY x.date_paiement ASC, x.id ASC`,
+    [String(annee)]
+  );
+}
+
+/**
+ * Solde de caisse à la date d'édition, tous exercices confondus.
+ *
+ * Le document doit porter le même chiffre que l'écran Trésorerie, sans quoi
+ * l'assemblée aurait deux vérités à concilier.
+ */
+async function calculerSolde() {
+  const cotisations = await lireUne(
+    "SELECT COALESCE(SUM(montant), 0) AS somme FROM cotisations WHERE statut = 'validee'"
+  );
+  const penalites = await lireUne(
+    `SELECT COALESCE(SUM(montant), 0) AS somme FROM sanctions
+      WHERE type = 'penalite' AND statut = 'reglee'`
+  );
+  const depenses = await lireUne('SELECT COALESCE(SUM(montant), 0) AS somme FROM decaissements');
+
+  return {
+    cotisations: Number(cotisations.somme) || 0,
+    penalites: Number(penalites.somme) || 0,
+    depenses: Number(depenses.somme) || 0,
+    solde: (Number(cotisations.somme) || 0) + (Number(penalites.somme) || 0) - (Number(depenses.somme) || 0),
+  };
 }
 
 /** Nom de fichier proposé au téléchargement. */
@@ -177,6 +219,64 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
 
     feuillePenalites.getColumn(5).numFmt = '# ##0';
     feuillePenalites.getColumn(5).alignment = { horizontal: 'right' };
+
+    // --- Feuille 3 : dépenses ----------------------------------------------
+    const depenses = await lireDepenses(annee);
+    const feuilleDepenses = classeur.addWorksheet(`Dépenses ${annee}`);
+
+    feuilleDepenses.columns = [
+      { header: 'Date', key: 'date', width: 14 },
+      { header: 'Catégorie', key: 'categorie', width: 26 },
+      { header: 'Libellé', key: 'libelle', width: 38 },
+      { header: 'Montant', key: 'montant', width: 14 },
+      { header: 'Bénéficiaire', key: 'beneficiaire', width: 24 },
+      { header: 'Payé par', key: 'paye_par', width: 20 },
+    ];
+
+    const enTeteDepenses = feuilleDepenses.getRow(1);
+    enTeteDepenses.font = { bold: true };
+    enTeteDepenses.eachCell((cellule) => {
+      cellule.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE6E3DD' } };
+      cellule.border = { bottom: { style: 'thin', color: { argb: 'FF888780' } } };
+    });
+
+    for (const depense of depenses) {
+      feuilleDepenses.addRow([
+        formaterDate(depense.date_paiement),
+        CATEGORIES[depense.categorie] || depense.categorie,
+        depense.libelle,
+        Number(depense.montant),
+        depense.beneficiaire || '',
+        LIBELLE_PAYE_PAR[depense.paye_par] || depense.paye_par,
+      ]);
+    }
+
+    if (depenses.length === 0) {
+      feuilleDepenses.addRow(['Aucune dépense sur la période']);
+    }
+
+    const totalDepenses = depenses.reduce((somme, ligne) => somme + Number(ligne.montant), 0);
+    const ligneTotalDepenses = feuilleDepenses.addRow(['TOTAL', '', '', totalDepenses, '', '']);
+    ligneTotalDepenses.font = { bold: true };
+    ligneTotalDepenses.eachCell((cellule) => {
+      cellule.border = { top: { style: 'thin', color: { argb: 'FF1C1B1A' } } };
+    });
+
+    feuilleDepenses.getColumn(4).numFmt = '# ##0';
+    feuilleDepenses.getColumn(4).alignment = { horizontal: 'right' };
+
+    // Ligne de solde, en fin de document : le même chiffre que l'écran Trésorerie.
+    const situation = await calculerSolde();
+    feuilleDepenses.addRow([]);
+    const ligneSolde = feuilleDepenses.addRow([
+      'SOLDE DE CAISSE',
+      `cotisations ${formaterMontant(situation.cotisations)} + pénalités ${formaterMontant(situation.penalites)} − dépenses ${formaterMontant(situation.depenses)}`,
+      '',
+      situation.solde,
+      '',
+      '',
+    ]);
+    ligneSolde.font = { bold: true };
 
     const tampon = await classeur.xlsx.writeBuffer();
 
@@ -403,6 +503,83 @@ routeur.get('/historique.pdf', async (requete, reponse) => {
       .fillColor('#888780')
       .text(
         "Les règlements de pénalité sont comptabilisés à part : ils n'entrent pas dans le total des cotisations.",
+        document.page.margins.left,
+        document.y
+      );
+
+    // --- Page 3 : dépenses --------------------------------------------------
+    const depenses = await lireDepenses(annee);
+
+    document.addPage();
+    dessinerEnTete(document, annee);
+
+    document
+      .font('Helvetica-Bold')
+      .fontSize(11)
+      .fillColor('#1C1B1A')
+      .text(`Dépenses ${annee}`, document.page.margins.left, document.y);
+    document.moveDown(0.5);
+
+    const colonnesDepenses = [70, 130, 240, 85, 130, 95];
+    const enTeteDepenses = ['Date', 'Catégorie', 'Libellé', 'Montant', 'Bénéficiaire', 'Payé par'];
+    dessinerLigne(document, enTeteDepenses, colonnesDepenses, { gras: true, fond: '#E6E3DD' });
+
+    for (const depense of depenses) {
+      if (document.y > basDePage) {
+        document.addPage();
+        dessinerEnTete(document, annee);
+        dessinerLigne(document, enTeteDepenses, colonnesDepenses, { gras: true, fond: '#E6E3DD' });
+      }
+
+      dessinerLigne(
+        document,
+        [
+          formaterDate(depense.date_paiement),
+          CATEGORIES[depense.categorie] || depense.categorie,
+          depense.libelle,
+          formaterMontant(depense.montant),
+          depense.beneficiaire || '·',
+          LIBELLE_PAYE_PAR[depense.paye_par] || depense.paye_par,
+        ],
+        colonnesDepenses
+      );
+    }
+
+    if (depenses.length === 0) {
+      dessinerLigne(document, ['Aucune dépense sur la période', '', '', '', '', ''], colonnesDepenses);
+    }
+
+    const totalDepenses = depenses.reduce((somme, ligne) => somme + Number(ligne.montant), 0);
+    dessinerLigne(
+      document,
+      ['TOTAL', '', '', formaterMontant(totalDepenses), '', ''],
+      colonnesDepenses,
+      { gras: true, fond: '#1C1B1A' }
+    );
+
+    // --- Ligne de solde, en fin de document ---------------------------------
+    const situation = await calculerSolde();
+
+    document.moveDown(1);
+    document
+      .font('Helvetica-Bold')
+      .fontSize(11)
+      .fillColor('#1C1B1A')
+      .text(
+        `Solde de caisse : ${formaterMontant(situation.solde)} XAF`,
+        document.page.margins.left,
+        document.y
+      );
+
+    document.moveDown(0.3);
+    document
+      .font('Helvetica')
+      .fontSize(8)
+      .fillColor('#888780')
+      .text(
+        `cotisations validées ${formaterMontant(situation.cotisations)} ` +
+          `+ pénalités encaissées ${formaterMontant(situation.penalites)} ` +
+          `− dépenses ${formaterMontant(situation.depenses)}`,
         document.page.margins.left,
         document.y
       );

@@ -226,11 +226,15 @@ routeur.post(
       return reponse.status(400).json({ error: conversion.erreur });
     }
 
-    // Le reçu est ce qui distingue une déclaration d'une simple affirmation :
-    // il est obligatoire, contrairement à la saisie par le trésorier.
-    if (!requete.file) {
-      console.warn(`[declaration] refus : aucun reçu joint (membre #${idMembre})`);
-      return reponse.status(400).json({ error: 'Le reçu de paiement est obligatoire' });
+    // Reçu obligatoire en Mobile Money, facultatif en espèces (LOT 3 bis) :
+    // un transfert laisse toujours une trace consultable, une remise de billets
+    // de la main à la main n'en laisse aucune. Exiger une pièce impossible à
+    // fournir reviendrait à fermer la déclaration aux paiements en espèces.
+    if (!requete.file && moyen === 'Mobile Money') {
+      console.warn(`[declaration] refus : aucun reçu joint en Mobile Money (membre #${idMembre})`);
+      return reponse
+        .status(400)
+        .json({ error: 'Le reçu est obligatoire pour un paiement Mobile Money' });
     }
 
     if (quotaDeclarationsDepasse(source)) {
@@ -264,7 +268,11 @@ routeur.post(
         return reponse.status(409).json({ error: message });
       }
 
-      const depot = await televerserJustificatifDetaille(requete.file, idMembre);
+      // Sans reçu (espèces), la déclaration part quand même : le trésorier
+      // tranchera sur sa seule connaissance de la remise.
+      const depot = requete.file
+        ? await televerserJustificatifDetaille(requete.file, idMembre)
+        : { url: null, cle: null };
 
       const resultat = await executer(
         `INSERT INTO cotisations (member_id, montant, moyen, fichier_s3_url, cle_s3, statut, date_paiement)

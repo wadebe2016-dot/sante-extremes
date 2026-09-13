@@ -3,9 +3,9 @@
  *   GET /api/tresorerie?annee=2026   (PUBLIC)
  *
  * Tous les membres doivent pouvoir constater ce que l'association détient
- * réellement. C'est la seule vue qui RÉUNIT les deux comptabilités :
+ * réellement. C'est la seule vue qui RÉUNIT toutes les comptabilités :
  *
- *   solde réel = cotisations validées + pénalités encaissées
+ *   solde réel = cotisations validées + pénalités encaissées − décaissements
  *
  * Partout ailleurs elles restent séparées — l'historique annuel et le total
  * encaissé de /api/stats ignorent les pénalités, à dessein. Ici on veut la
@@ -65,6 +65,40 @@ routeur.get('/', async (requete, reponse) => {
       [anneeTexte]
     );
 
+    // --- Sorties de caisse ------------------------------------------------
+    const decaissementsTotal = await lireUne(
+      'SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre FROM decaissements'
+    );
+
+    const decaissementsAnnee = await lireUne(
+      `SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre
+         FROM decaissements
+        WHERE strftime('%Y', date_paiement) = ?`,
+      [anneeTexte]
+    );
+
+    // Demandes approuvées et non encore payées : l'argent est promis, il est
+    // encore en caisse mais ne doit pas être considéré comme disponible.
+    const engage = await lireUne(
+      `SELECT COALESCE(SUM(montant_estime), 0) AS somme, COUNT(*) AS nombre
+         FROM demandes
+        WHERE statut = 'approuvee'`
+    );
+
+    const demandesEnAttente = await lireUne(
+      `SELECT COALESCE(SUM(montant_estime), 0) AS somme, COUNT(*) AS nombre
+         FROM demandes
+        WHERE statut = 'en_attente'`
+    );
+
+    const depensesParCategorie = await lireToutes(
+      `SELECT d.categorie, COALESCE(SUM(x.montant), 0) AS somme, COUNT(*) AS nombre
+         FROM decaissements x
+         JOIN demandes d ON d.id = x.demande_id
+        GROUP BY d.categorie
+        ORDER BY somme DESC`
+    );
+
     // --- Sommes attendues, pas encore en caisse ---------------------------
     const penalitesDues = await lireUne(
       `SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre
@@ -79,6 +113,15 @@ routeur.get('/', async (requete, reponse) => {
     );
 
     // --- Répartition mensuelle de l'année ---------------------------------
+    const decaissementsParMois = await lireToutes(
+      `SELECT CAST(strftime('%m', date_paiement) AS INTEGER) AS mois,
+              COALESCE(SUM(montant), 0) AS somme
+         FROM decaissements
+        WHERE strftime('%Y', date_paiement) = ?
+        GROUP BY mois`,
+      [anneeTexte]
+    );
+
     const cotisationsParMois = await lireToutes(
       `SELECT CAST(strftime('%m', date_paiement) AS INTEGER) AS mois,
               COALESCE(SUM(montant), 0) AS somme
@@ -98,10 +141,11 @@ routeur.get('/', async (requete, reponse) => {
       [anneeTexte]
     );
 
-    const parMois = MOIS.map((libelle, index) => ({
+    const parMois = MOIS.map((libelle) => ({
       mois: libelle,
       cotisations: 0,
       penalites: 0,
+      depenses: 0,
       total: 0,
     }));
 
@@ -117,13 +161,22 @@ routeur.get('/', async (requete, reponse) => {
       parMois[index].penalites = nombre(ligne.somme);
     }
 
+    for (const ligne of decaissementsParMois) {
+      const index = Number(ligne.mois) - 1;
+      if (index < 0 || index > 11) continue;
+      parMois[index].depenses = nombre(ligne.somme);
+    }
+
+    // Solde net du mois : ce qui est entré moins ce qui est sorti.
     for (const entree of parMois) {
-      entree.total = entree.cotisations + entree.penalites;
+      entree.total = entree.cotisations + entree.penalites - entree.depenses;
     }
 
     // --- Derniers mouvements, toutes natures confondues --------------------
     // Une union plutôt que deux listes : le lecteur veut un relevé de caisse
     // chronologique, pas deux colonnes à recouper lui-même.
+    // Les décaissements y figurent en négatif : un relevé de caisse mêle les
+    // entrées et les sorties, c'est son intérêt.
     const mouvements = await lireToutes(
       `SELECT 'cotisation' AS nature, c.id, m.name AS membre, c.montant, c.moyen,
               c.date_paiement AS date, NULL AS motif
@@ -134,11 +187,19 @@ routeur.get('/', async (requete, reponse) => {
               s.date_reglement AS date, s.motif
          FROM sanctions s JOIN members m ON m.id = s.member_id
         WHERE s.type = 'penalite' AND s.statut = 'reglee'
+       UNION ALL
+       SELECT 'depense' AS nature, x.id, d.libelle AS membre, -x.montant AS montant, x.moyen,
+              x.date_paiement AS date, d.categorie AS motif
+         FROM decaissements x JOIN demandes d ON d.id = x.demande_id
         ORDER BY date DESC
         LIMIT 20`
     );
 
-    const soldeReel = nombre(cotisationsTotal.somme) + nombre(penalitesTotal.somme);
+    const soldeReel =
+      nombre(cotisationsTotal.somme) +
+      nombre(penalitesTotal.somme) -
+      nombre(decaissementsTotal.somme);
+
     const attendu = nombre(penalitesDues.somme) + nombre(declarationsEnAttente.somme);
 
     const charge = {
@@ -153,6 +214,25 @@ routeur.get('/', async (requete, reponse) => {
         nb_cotisations: nombre(cotisationsTotal.nombre),
         penalites: nombre(penalitesTotal.somme),
         nb_penalites: nombre(penalitesTotal.nombre),
+        total: nombre(cotisationsTotal.somme) + nombre(penalitesTotal.somme),
+      },
+
+      // Ce qui est sorti de caisse, et ce qui est promis sans être sorti.
+      depense: {
+        total: nombre(decaissementsTotal.somme),
+        nombre: nombre(decaissementsTotal.nombre),
+        par_categorie: depensesParCategorie.map((ligne) => ({
+          categorie: ligne.categorie,
+          montant: nombre(ligne.somme),
+          nombre: nombre(ligne.nombre),
+        })),
+      },
+
+      engage: {
+        total: nombre(engage.somme),
+        nombre: nombre(engage.nombre),
+        demandes_en_attente: nombre(demandesEnAttente.somme),
+        nb_demandes_en_attente: nombre(demandesEnAttente.nombre),
       },
 
       // Même décomposition, restreinte à l'année demandée.
@@ -161,7 +241,12 @@ routeur.get('/', async (requete, reponse) => {
         nb_cotisations: nombre(cotisationsAnnee.nombre),
         penalites: nombre(penalitesAnnee.somme),
         nb_penalites: nombre(penalitesAnnee.nombre),
-        total: nombre(cotisationsAnnee.somme) + nombre(penalitesAnnee.somme),
+        depenses: nombre(decaissementsAnnee.somme),
+        nb_depenses: nombre(decaissementsAnnee.nombre),
+        total:
+          nombre(cotisationsAnnee.somme) +
+          nombre(penalitesAnnee.somme) -
+          nombre(decaissementsAnnee.somme),
       },
 
       // Sommes annoncées mais pas encore en caisse.
@@ -188,8 +273,9 @@ routeur.get('/', async (requete, reponse) => {
 
     console.log(
       `[tresorerie] situation servie : solde ${soldeReel} XAF ` +
-        `(${charge.encaisse.cotisations} cotisations + ${charge.encaisse.penalites} pénalités), ` +
-        `${attendu} XAF attendus`
+        `(${charge.encaisse.cotisations} cotisations + ${charge.encaisse.penalites} pénalités ` +
+        `− ${charge.depense.total} dépenses), ${attendu} XAF attendus, ` +
+        `${charge.engage.total} XAF engagés`
     );
 
     return reponse.status(200).json(charge);

@@ -282,6 +282,107 @@ ci-dessous.
 
 ---
 
+## LOT 3 bis — Dépenses, nouveaux rôles, codes courts, reçu facultatif
+
+### A. Deux rôles de plus, et des codes à six chiffres
+
+`intendant` (`INTENDANT_PASSWORD`) et `competitions` (`COMPETITIONS_PASSWORD`) rejoignent les quatre
+rôles existants. Libellés dans l'application : Admin, Trésorier, Secrétaire, Censeur, Intendant,
+Compétitions.
+
+Les codes passent à **six chiffres**. C'est un million de combinaisons — quelques heures pour un
+script sans frein. Le plafond d'essais n'est donc plus un confort, c'est **la condition qui rend ces
+codes courts acceptables** : cinq échecs par IP sur quinze minutes, puis 429 avec `Retry-After`.
+
+Deux points qui comptent :
+
+- le plafond s'applique à `/api/auth/verify` **et à toutes les routes protégées**, via un compteur
+  partagé (`src/middleware/limiteur.js`). Cantonné à la vérification, il aurait suffi de changer de
+  route pour repartir de zéro ;
+- chaque échec est journalisé — rôle visé, IP, horodatage, rang de l'échec. **Le code essayé n'y
+  figure jamais** : un journal n'est pas un endroit où écrire des secrets, et un utilisateur
+  légitime se trompe régulièrement d'une touche.
+
+Un succès remet le compteur à zéro : celui qui se trompe deux fois n'est jamais pénalisé.
+
+Côté application, le champ de code passe en clavier numérique, six chiffres, sans autocorrection ni
+suggestion.
+
+### B. Reçu facultatif en espèces
+
+`POST /api/cotisations/declarer` n'exige le fichier que si `moyen = Mobile Money`. Un transfert
+laisse toujours une trace consultable ; une remise de billets de la main à la main n'en laisse
+aucune. Exiger une pièce impossible à fournir aurait fermé la déclaration aux paiements en espèces —
+c'est-à-dire à une bonne part des versements. Le formulaire affiche « obligatoire » ou « facultatif »
+selon le moyen sélectionné.
+
+### C. Demandes de dépense et décaissements
+
+**Principe : personne ne décaisse sans demande approuvée.** Les intendants, le secrétariat et les
+gestionnaires de compétitions expriment le besoin ; le trésorier approuve, refuse, puis décaisse.
+
+Deux tables additives : `demandes` et `decaissements`. Sept catégories fermées — une liste libre
+rendrait toute statistique illisible.
+
+> **L'invariant est tenu deux fois.** Le code refuse de décaisser une demande qui n'est pas
+> `approuvee` (409), et le schéma porte une contrainte `UNIQUE` sur `decaissements.demande_id`. Le
+> contrôle applicatif seul laisserait passer deux requêtes simultanées sur la même demande.
+
+**Le trésorier ne peut pas exprimer de besoin** (401) : celui qui décide du décaissement ne doit pas
+être celui qui le demande. Seul l'admin cumule.
+
+| Méthode | Route | Rôle |
+| --- | --- | --- |
+| `GET` | `/api/demandes?statut=&annee=` | **public** |
+| `POST` | `/api/demandes` | intendant, secrétaire, compétitions |
+| `POST` | `/api/demandes/:id/approuver` | trésorier |
+| `POST` | `/api/demandes/:id/refuser` | trésorier — motif obligatoire |
+| `DELETE` | `/api/demandes/:id` | le rôle demandeur, tant que « en_attente » |
+| `POST` | `/api/demandes/:id/decaisser` | trésorier — 409 hors « approuvee » |
+| `GET` | `/api/decaissements?annee=` | **public** |
+| `GET` | `/api/decaissements/:id/justificatif` | trésorier, intendant, secrétaire, compétitions |
+
+La liste des dépenses est **publique** : les membres financent l'association, ils doivent pouvoir
+constater ce qui en sort. Le justificatif, lui, reste réservé aux rôles concernés et n'est servi que
+par URL pré-signée.
+
+### Trésorerie, complétée
+
+    solde réel = cotisations validées + pénalités encaissées − décaissements
+
+S'y ajoutent un bloc **engagé** — demandes approuvées non encore payées, l'argent est promis sans
+être sorti — la répartition des dépenses par catégorie, et des mouvements chronologiques où les
+décaissements figurent **en négatif** : un relevé de caisse mêle entrées et sorties, c'est son
+intérêt.
+
+Les exports gagnent une feuille et une page « Dépenses AAAA » (date, catégorie, libellé, montant,
+bénéficiaire, payé par) et une **ligne de solde** en fin de document, avec sa décomposition — le
+document doit porter le même chiffre que l'écran, sans quoi l'assemblée aurait deux vérités à
+concilier.
+
+### Vérifications
+
+| Cas | Attendu | Obtenu |
+| --- | --- | --- |
+| Les six codes sur `/api/auth/verify` | rôle correspondant | ✅ dont `intendant` et `competitions` |
+| Trésorier crée une demande | 401 | ✅ 401 |
+| Secrétaire, intendant, compétitions créent | 201 | ✅ 201 chacun |
+| Décaisser une demande « en_attente » | 409 | ✅ « Seule une demande approuvée peut être décaissée » |
+| Décaisser deux fois la même demande | 409 | ✅ |
+| Après décaissement de 8 000 | solde −8 000 | ✅ 100 000 → 92 000 |
+| `/api/historique` après décaissement | inchangé | ✅ 100 000 — les cotisations ne bougent pas |
+| Déclarer Espèce **sans** fichier | 201 | ✅ 201 |
+| Déclarer Mobile Money **sans** fichier | 400 | ✅ « Le reçu est obligatoire pour un paiement Mobile Money » |
+| 6 mauvais codes en 15 min | 429 au 6ᵉ | ✅ 401 ×5 puis 429 — et 429 aussi sur les routes protégées |
+| Export `.xlsx` | 3 feuilles + solde | ✅ « Cotisations 2026 \| Pénalités 2026 \| Dépenses 2026 », ligne `SOLDE DE CAISSE … 92000` |
+| Export `.pdf` | page Dépenses + solde | ✅ 200 `application/pdf` |
+
+`node --check` sur les 10 fichiers backend modifiés ou créés : **OK**.
+`flutter analyze` : **0 erreur, 0 avertissement**. `flutter test` : **14 tests**. APK release arm64
+construit en local.
+
+---
+
 ## Point de blocage à traiter : l'instance EC2 n'a pas d'accès S3
 
 Ni clés dans `.env`, ni rôle IAM attaché. En l'état, **les justificatifs de paiement, le règlement
@@ -329,12 +430,11 @@ Le SDK détecte seul le rôle : aucune clé ne doit être écrite dans `.env`.
 
 ## Résumé pour l'architecte
 
-1. **Backend** : quatre rôles par code (`exigerRole`), `POST /api/auth/verify`, sanctions et pénalités (comptées **à part** des cotisations), `GET /api/historique?annee=`, exports `.xlsx` / `.pdf`, règlement intérieur et fiches santé sur S3 via URL pré-signées, **déclaration de paiement par le membre** (en attente jusqu'à validation du trésorier) et **`GET /api/tresorerie` publique**. Migration SQLite additive, LOT 1 intact.
-2. **Flutter** : cinq onglets, charte charbon/rouge/crème, Manrope, un seul bandeau par écran, codes mémorisés localement, déclaration ouverte à tous, file « À valider » du trésorier, écran Trésorerie public.
-3. **Sur l'instance**, dans l'ordre :
-   `cd ~/sante-extremes/backend && git pull && npm install`
-   puis ajouter dans `.env` : `ADMIN_PASSWORD=SDE-Admin-26`, `TRESORIER_PASSWORD=SDE-Tresor-26`, `SECRETAIRE_PASSWORD=SDE-Secretaire-26`, `CENSEUR_PASSWORD=SDE-Censeur-26`
-   puis `npm run migrate && sudo systemctl restart sde-api`
-4. **Tester** : `curl -X POST https://sde-api.atlastech.cm/api/auth/verify -H 'Content-Type: application/json' -d '{"code":"SDE-Tresor-26"}'` → `{"roles":["tresorier"]}` ; sans code sur `/api/cotisations` → 401 ; `GET /api/historique` → 200 ; `GET /api/tresorerie` → 200 (solde = cotisations validées + pénalités encaissées) ; `GET /api/export/historique.pdf?annee=2026` → 200 `application/pdf`.
-5. **Bloquant S3** : l'instance n'a **ni clés ni rôle IAM**. Justificatifs, règlement, fiches santé **et déclarations de paiement** échoueront en 500 tant qu'un rôle portant `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject` sur `arn:aws:s3:::<BUCKET>/*` et `s3:ListBucket` sur `arn:aws:s3:::<BUCKET>` ne lui est pas attaché (commandes ci-dessus). La déclaration par le membre est la fonction la plus exposée : elle repose entièrement sur le dépôt du reçu.
-6. **Changer les quatre codes** avant l'assemblée : ceux du point 3 sont des valeurs de mise en service, connues de toute personne lisant ce document.
+1. **Backend** : six rôles par code (ajout d'`intendant` et `competitions`), codes à **six chiffres** protégés par un plafond de 5 échecs par IP sur 15 minutes (429 ensuite, chaque échec journalisé) ; **demandes de dépense et décaissements** — personne ne décaisse sans demande approuvée, invariant tenu par le code et par une contrainte `UNIQUE` ; reçu de déclaration désormais facultatif en espèces, obligatoire en Mobile Money.
+2. **Trésorerie** : `solde réel = cotisations validées + pénalités encaissées − décaissements`, plus un bloc « engagé » et la répartition des dépenses par catégorie. Exports enrichis d'une feuille et d'une page « Dépenses AAAA » et d'une ligne de solde.
+3. **Flutter** : écran Trésorerie à trois sections (demandes, dépenses, répartition), bouton « Exprimer un besoin », approbation, refus et décaissement par le trésorier, badge des demandes en attente sur le portefeuille. Champ de code en clavier numérique à six chiffres. État et Historique inchangés — cotisations uniquement.
+4. **Sur l'instance** : `cd ~/sante-extremes/backend && git pull && npm install && npm run migrate && sudo systemctl restart sde-api`
+5. **Écrire dans le `.env` de l'instance** les six variables, chacune avec un code à six chiffres choisi par vos soins et **jamais écrit dans le dépôt** : `ADMIN_PASSWORD`, `TRESORIER_PASSWORD`, `SECRETAIRE_PASSWORD`, `CENSEUR_PASSWORD`, `INTENDANT_PASSWORD`, `COMPETITIONS_PASSWORD`. Un rôle dont la variable est absente n'est jamais accordé.
+6. **Tester** : `/api/auth/verify` avec chacun des six codes → le rôle attendu ; six codes erronés d'affilée → 429 au sixième ; création d'une demande par le trésorier → 401, par le secrétaire → 201 ; décaisser une demande non approuvée → 409 ; après décaissement, `/api/tresorerie.solde_reel` baisse du montant et `/api/historique` ne bouge pas ; déclarer en espèces sans reçu → 201, en Mobile Money sans reçu → 400.
+7. **Bloquant S3 inchangé** : sans rôle IAM sur l'instance, justificatifs, règlement, fiches santé, déclarations **et pièces de dépense** échouent en 500. Politique minimale et commandes exactes ci-dessus.
+8. **Changer les six codes** avant l'assemblée, et ne jamais les transmettre par un canal qui les conserve.

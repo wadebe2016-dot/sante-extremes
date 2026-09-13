@@ -16,6 +16,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const limiteur = require('./limiteur');
 
 /** Correspondance rôle → variable d'environnement portant son code. */
 const VARIABLES_PAR_ROLE = Object.freeze({
@@ -23,6 +24,8 @@ const VARIABLES_PAR_ROLE = Object.freeze({
   tresorier: 'TRESORIER_PASSWORD',
   secretaire: 'SECRETAIRE_PASSWORD',
   censeur: 'CENSEUR_PASSWORD',
+  intendant: 'INTENDANT_PASSWORD',
+  competitions: 'COMPETITIONS_PASSWORD',
 });
 
 const ROLES_CONNUS = Object.freeze(Object.keys(VARIABLES_PAR_ROLE));
@@ -100,6 +103,15 @@ function exigerRole(...rolesAutorises) {
       return reponse.status(500).json({ error: 'Configuration serveur incomplète' });
     }
 
+    const source = limiteur.sourceDe(requete);
+
+    // Les codes font six chiffres : le plafond d'essais s'applique ici aussi,
+    // sans quoi les routes protégées deviendraient l'oracle que /auth/verify
+    // n'est plus.
+    if (limiteur.estBloquee(source)) {
+      return limiteur.repondreBloque(reponse, source);
+    }
+
     const code = extraireCode(requete);
     if (!code) {
       console.warn(`[auth] en-tête Authorization manquant ou mal formé sur ${requete.method} ${requete.originalUrl}`);
@@ -112,10 +124,11 @@ function exigerRole(...rolesAutorises) {
     if (autorises.length === 0) {
       // On ne dit jamais si le code est inconnu ou simplement insuffisant :
       // la distinction renseignerait un attaquant sur la validité du code.
-      console.warn(`[auth] code refusé sur ${requete.method} ${requete.originalUrl}`);
+      limiteur.enregistrerEchec(source, `rôle attendu : ${[...acceptes].join('|')}`);
       return reponse.status(401).json({ error: 'Code invalide ou droits insuffisants' });
     }
 
+    limiteur.reinitialiser(source);
     requete.roles = roles;
     console.log(`[auth] accès accordé (${autorises.join(', ')}) sur ${requete.method} ${requete.originalUrl}`);
     return suite();
