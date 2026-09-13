@@ -17,19 +17,34 @@ CREATE TABLE IF NOT EXISTS members (
 );
 
 -- Table des paiements de cotisation, rattachés à un membre
+--
+-- LOT 3 bis — déclaration par le membre : une cotisation peut naître « en_attente »
+-- lorsqu'un membre déclare lui-même son versement ; le trésorier la valide ou la
+-- refuse. SEULES les cotisations « validee » comptent dans les totaux, le statut
+-- du mois, l'historique annuel et les exports.
+--
+-- Les colonnes ajoutées après coup (statut, motif_refus, date_validation,
+-- cle_s3) sont posées par src/db.js sur les bases existantes : un
+-- CREATE TABLE IF NOT EXISTS n'ajoute rien à une table déjà présente.
 CREATE TABLE IF NOT EXISTS cotisations (
-  id             INTEGER PRIMARY KEY AUTOINCREMENT,
-  member_id      INTEGER NOT NULL,
-  montant        REAL NOT NULL CHECK (montant > 0),
-  moyen          TEXT NOT NULL CHECK (moyen IN ('Mobile Money', 'Espèce')),
-  fichier_s3_url TEXT,
-  date_paiement  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  member_id       INTEGER NOT NULL,
+  montant         REAL NOT NULL CHECK (montant > 0),
+  moyen           TEXT NOT NULL CHECK (moyen IN ('Mobile Money', 'Espèce')),
+  fichier_s3_url  TEXT,
+  cle_s3          TEXT,   -- clé privée du justificatif d'une déclaration
+  statut          TEXT NOT NULL DEFAULT 'validee'
+                    CHECK (statut IN ('validee', 'en_attente', 'refusee')),
+  motif_refus     TEXT,
+  date_validation TEXT,
+  date_paiement   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
   FOREIGN KEY (member_id) REFERENCES members (id) ON DELETE CASCADE
 );
 
 -- Index de lecture : le tableau public interroge les cotisations par membre et par date
 CREATE INDEX IF NOT EXISTS idx_cotisations_member ON cotisations (member_id);
 CREATE INDEX IF NOT EXISTS idx_cotisations_date ON cotisations (date_paiement);
+CREATE INDEX IF NOT EXISTS idx_cotisations_statut ON cotisations (member_id, statut);
 
 -- ---------------------------------------------------------------------------
 -- LOT 3 — Sanctions : pénalités financières et suspensions

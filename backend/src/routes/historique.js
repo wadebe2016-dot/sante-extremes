@@ -60,6 +60,7 @@ async function construireHistorique(annee) {
               COUNT(*)     AS nombre
        FROM cotisations
       WHERE strftime('%Y', date_paiement) = ?
+        AND statut = 'validee'
       GROUP BY member_id, mois`,
     [String(annee)]
   );

@@ -23,6 +23,8 @@ const routeur = express.Router();
 /** GET /api/stats — état des cotisations de tous les membres */
 routeur.get('/', async (requete, reponse) => {
   try {
+    // Seules les cotisations VALIDÉES comptent : une déclaration en attente ne
+    // met pas un membre à jour et n'entre dans aucun total.
     const lignes = await lireToutes(`
       SELECT
         m.id,
@@ -37,7 +39,8 @@ routeur.get('/', async (requete, reponse) => {
                        ELSE 0
                      END), 0) AS montant_mois
       FROM members m
-      LEFT JOIN cotisations c ON c.member_id = m.id
+      LEFT JOIN cotisations c
+        ON c.member_id = m.id AND c.statut = 'validee'
       GROUP BY m.id, m.name
       ORDER BY m.name COLLATE NOCASE ASC
     `);
@@ -50,14 +53,44 @@ routeur.get('/', async (requete, reponse) => {
         JOIN (
           SELECT member_id, MAX(date_paiement) AS date_max
             FROM cotisations
+           WHERE statut = 'validee'
            GROUP BY member_id
         ) dernier
           ON dernier.member_id = c.member_id
          AND dernier.date_max = c.date_paiement
+       WHERE c.statut = 'validee'
       GROUP BY c.member_id
     `);
 
     const detailParMembre = new Map(derniers.map((ligne) => [ligne.member_id, ligne]));
+
+    // Déclarations du mois courant encore en attente du trésorier.
+    const enAttente = await lireToutes(`
+      SELECT member_id, COUNT(*) AS nombre
+        FROM cotisations
+       WHERE statut = 'en_attente'
+         AND strftime('%Y-%m', date_paiement) = strftime('%Y-%m', 'now')
+       GROUP BY member_id
+    `);
+
+    const attenteParMembre = new Set(enAttente.map((ligne) => ligne.member_id));
+
+    // Dernier refus du mois : le membre doit savoir pourquoi sa déclaration a
+    // été écartée, sans quoi il la renverra à l'identique.
+    const refus = await lireToutes(`
+      SELECT member_id, motif_refus
+        FROM cotisations
+       WHERE statut = 'refusee'
+         AND strftime('%Y-%m', date_paiement) = strftime('%Y-%m', 'now')
+         AND id IN (
+           SELECT MAX(id) FROM cotisations
+            WHERE statut = 'refusee'
+              AND strftime('%Y-%m', date_paiement) = strftime('%Y-%m', 'now')
+            GROUP BY member_id
+         )
+    `);
+
+    const refusParMembre = new Map(refus.map((ligne) => [ligne.member_id, ligne.motif_refus]));
 
     // Sanctions en cours : pénalités non réglées et suspensions non échues.
     const sanctions = await lireToutes(`
@@ -82,10 +115,17 @@ routeur.get('/', async (requete, reponse) => {
       const dernier = detailParMembre.get(ligne.id);
       const sanction = sanctionsParMembre.get(ligne.id);
 
+      // Trois états distincts pour le mois en cours. « en_attente » n'est pas
+      // « payé » : le trésorier n'a encore rien confirmé.
+      const paye = ligne.paye_ce_mois === 1;
+      const statutMois = paye ? 'paye' : (attenteParMembre.has(ligne.id) ? 'en_attente' : 'impaye');
+
       return {
         id: ligne.id,
         name: ligne.name,
-        paid: ligne.paye_ce_mois === 1,
+        paid: paye,
+        statut_mois: statutMois,
+        motif_refus: statutMois === 'impaye' ? refusParMembre.get(ligne.id) || null : null,
         last_paiement: ligne.last_paiement || null,
         montant_total: Number(ligne.montant_mois) || 0,
         dernier_montant: dernier ? Number(dernier.montant) || 0 : null,
@@ -107,6 +147,7 @@ routeur.get('/', async (requete, reponse) => {
       percentage_paid: membres.length === 0 ? 0 : Math.round((nombreAJour / membres.length) * 100),
       current_month: moisCourant,
       montant_encaisse: montantEncaisse,
+      en_attente: membres.filter((membre) => membre.statut_mois === 'en_attente').length,
       penalites_dues: membres.reduce((somme, membre) => somme + membre.penalite_due, 0),
       suspensions_actives: membres.filter((membre) => membre.suspendu).length,
     };

@@ -79,27 +79,97 @@ function lireToutes(sql, parametres = []) {
 }
 
 /**
- * Applique schema.sql (idempotent : toutes les instructions sont en IF NOT EXISTS).
+ * Colonnes ajoutées après la mise en service, par table.
+ *
+ * « CREATE TABLE IF NOT EXISTS » ne touche pas une table déjà présente : sur une
+ * base de production existante, les colonnes nouvelles doivent être posées une
+ * par une. Chaque entrée est purement additive et porte sa valeur par défaut,
+ * de sorte que les lignes déjà écrites gardent le comportement d'avant.
  */
-function migrer() {
-  return new Promise((resoudre, rejeter) => {
-    let schema;
-    try {
-      schema = fs.readFileSync(CHEMIN_SCHEMA, 'utf8');
-    } catch (erreur) {
-      console.error(`[migration] schema.sql illisible : ${erreur.message}`);
-      return rejeter(erreur);
-    }
+const COLONNES_AJOUTEES = {
+  cotisations: [
+    // L'existant est réputé validé : ces lignes ont été saisies par le trésorier.
+    { nom: 'statut', definition: "TEXT NOT NULL DEFAULT 'validee'" },
+    { nom: 'motif_refus', definition: 'TEXT' },
+    { nom: 'date_validation', definition: 'TEXT' },
+    { nom: 'cle_s3', definition: 'TEXT' },
+  ],
+};
 
-    obtenirBd().exec(schema, (erreur) => {
-      if (erreur) {
-        console.error(`[migration] échec de l'application du schéma : ${erreur.message}`);
-        return rejeter(erreur);
-      }
-      console.log('[migration] schéma appliqué (members, cotisations, index)');
-      resoudre();
+/** Liste les colonnes existantes d'une table. */
+function colonnesDe(table) {
+  return new Promise((resoudre, rejeter) => {
+    obtenirBd().all(`PRAGMA table_info(${table})`, (erreur, lignes) => {
+      if (erreur) return rejeter(erreur);
+      resoudre((lignes || []).map((ligne) => ligne.name));
     });
   });
+}
+
+/**
+ * Ajoute les colonnes manquantes aux tables déjà créées.
+ *
+ * SQLite ne connaît pas « ADD COLUMN IF NOT EXISTS » : on inspecte donc la table
+ * avant d'écrire. Aucune colonne n'est jamais supprimée ni retypée.
+ */
+async function completerColonnes() {
+  for (const [table, colonnes] of Object.entries(COLONNES_AJOUTEES)) {
+    let existantes;
+    try {
+      existantes = await colonnesDe(table);
+    } catch (erreur) {
+      console.error(`[migration] lecture impossible de ${table} : ${erreur.message}`);
+      throw erreur;
+    }
+
+    // Table absente : schema.sql vient de la créer avec toutes ses colonnes.
+    if (existantes.length === 0) continue;
+
+    for (const colonne of colonnes) {
+      if (existantes.includes(colonne.nom)) continue;
+
+      await executer(`ALTER TABLE ${table} ADD COLUMN ${colonne.nom} ${colonne.definition}`);
+      console.log(`[migration] colonne ajoutée : ${table}.${colonne.nom}`);
+    }
+  }
+}
+
+/** Exécute un script SQL multi-instructions. */
+function executerScript(sql) {
+  return new Promise((resoudre, rejeter) => {
+    obtenirBd().exec(sql, (erreur) => (erreur ? rejeter(erreur) : resoudre()));
+  });
+}
+
+/**
+ * Migration complète, en deux temps.
+ *
+ * L'ORDRE COMPTE : les colonnes manquantes sont ajoutées AVANT l'application de
+ * schema.sql. Ce dernier crée un index sur « cotisations (member_id, statut) » ;
+ * sur une base antérieure, cette colonne n'existe pas encore et tout le script
+ * échouerait — donc aussi les instructions censées la créer.
+ *
+ * Sur une base neuve, la table n'existe pas : completerColonnes ne fait rien et
+ * schema.sql la crée d'emblée avec toutes ses colonnes.
+ */
+async function migrer() {
+  let schema;
+  try {
+    schema = fs.readFileSync(CHEMIN_SCHEMA, 'utf8');
+  } catch (erreur) {
+    console.error(`[migration] schema.sql illisible : ${erreur.message}`);
+    throw erreur;
+  }
+
+  try {
+    await completerColonnes();
+    await executerScript(schema);
+  } catch (erreur) {
+    console.error(`[migration] échec de l'application du schéma : ${erreur.message}`);
+    throw erreur;
+  }
+
+  console.log('[migration] schéma appliqué (members, cotisations, sanctions, documents)');
 }
 
 /** Ferme proprement la connexion (arrêt du serveur). */

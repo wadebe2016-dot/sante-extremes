@@ -94,8 +94,29 @@ const uploadDocument = multer({
   fileFilter: filtrerDocuments,
 });
 
+/**
+ * Déclaration d'un membre : le reçu est souvent un PDF envoyé par l'opérateur
+ * Mobile Money, pas seulement une photo. Même plafond que les justificatifs.
+ */
+function filtrerRecus(requete, fichier, rappel) {
+  if (![...TYPES_AUTORISES, 'application/pdf'].includes(fichier.mimetype)) {
+    console.warn(`[upload] reçu refusé : ${fichier.mimetype}`);
+    return rappel(new Error('Seules les images et les PDF sont acceptés'));
+  }
+  return rappel(null, true);
+}
+
+const uploadRecu = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: TAILLE_MAX, files: 1 },
+  fileFilter: filtrerRecus,
+});
+
 /** Middleware prêt à l'emploi : un seul fichier, champ « fichier ». */
 const recevoirJustificatif = uploadMemoire.single('fichier');
+
+/** Idem pour une déclaration de paiement (image ou PDF). */
+const recevoirRecu = uploadRecu.single('fichier');
 
 /** Idem pour les documents (règlement intérieur, fiche santé). */
 const recevoirDocument = uploadDocument.single('fichier');
@@ -132,10 +153,14 @@ function construireCleDocument(type, idMembre, nomOriginal) {
 }
 
 /**
- * Téléverse le justificatif sur S3 et renvoie son URL publique.
- * @returns {Promise<string>} URL https du fichier déposé
+ * Téléverse le justificatif sur S3 et renvoie sa clé ET son URL publique.
+ *
+ * La clé sert aux justificatifs de déclaration, qui restent privés et ne sont
+ * consultés que par le trésorier, via une URL pré-signée.
+ *
+ * @returns {Promise<{cle: string, url: string}>}
  */
-async function televerserJustificatif(fichier, idMembre) {
+async function televerserJustificatifDetaille(fichier, idMembre) {
   const bucket = exigerBucket();
   const region = process.env.AWS_REGION || 'eu-west-3';
   const cle = construireCleS3(idMembre, fichier.originalname);
@@ -163,7 +188,16 @@ async function televerserJustificatif(fichier, idMembre) {
     ? `${baseMedia}/${cle}`
     : `https://${bucket}.s3.${region}.amazonaws.com/${cle}`;
 
-  console.log(`[s3] justificatif déposé : ${url} (${fichier.size} octets)`);
+  console.log(`[s3] justificatif déposé : ${cle} (${fichier.size} octets)`);
+  return { cle, url };
+}
+
+/**
+ * Variante historique : ne renvoie que l'URL.
+ * @returns {Promise<string>} URL https du fichier déposé
+ */
+async function televerserJustificatif(fichier, idMembre) {
+  const { url } = await televerserJustificatifDetaille(fichier, idMembre);
   return url;
 }
 
@@ -268,7 +302,9 @@ function gererErreursUpload(erreur, requete, reponse, suite) {
 
 module.exports = {
   recevoirJustificatif,
+  recevoirRecu,
   televerserJustificatif,
+  televerserJustificatifDetaille,
   recevoirDocument,
   televerserDocument,
   urlPresignee,
