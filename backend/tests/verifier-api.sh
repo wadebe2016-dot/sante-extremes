@@ -46,6 +46,11 @@ REUSSIS=0
 ECHOUES=0
 IGNORES=0
 
+# Deux situations rendent inutile la suite des contrôles ; mieux vaut les
+# diagnostiquer une fois que de laisser défiler vingt échecs identiques.
+CODES_ABSENTS=0   # le serveur ne reconnaît aucun des six codes fournis
+IP_BLOQUEE=0      # le plafond anti-force brute s'est déclenché
+
 titre()  { printf '\n%s── %s%s\n' "${BLEU}" "$*" "${NEUTRE}"; }
 ignore() { printf '  %s–%s %-52s %s\n' "${JAUNE}" "${NEUTRE}" "$1" "$2"; IGNORES=$((IGNORES + 1)); }
 
@@ -59,6 +64,14 @@ verifier() {
     printf '  %s✓%s %-52s %s\n' "${VERT}" "${NEUTRE}" "${libelle}" "${obtenu}"
     REUSSIS=$((REUSSIS + 1))
     return 0
+  fi
+
+  # Un 429 inattendu signale le plafond d'essais, pas un défaut de la route :
+  # on le compte à part, sans quoi tout ce qui suit remonterait en échec.
+  if [ "${obtenu}" = "429" ]; then
+    IP_BLOQUEE=1
+    ignore "${libelle}" "adresse IP bloquée par le plafond d'essais"
+    return 1
   fi
 
   printf '  %s✗%s %-52s %s (attendu %s)\n' "${ROUGE}" "${NEUTRE}" "${libelle}" "${obtenu}" "${attendus}"
@@ -122,6 +135,9 @@ verifier "GET /documents/fiche-sante/1 sans code" "401" "${API}/documents/fiche-
 ###############################################################################
 titre "Reconnaissance des six codes"
 ###############################################################################
+ROLES_RECONNUS=0
+ROLES_TESTES=0
+
 controler_role() {
   local variable="$1" role_attendu="$2"
 
@@ -130,16 +146,32 @@ controler_role() {
     return
   fi
 
-  local roles
-  roles="$(curl -s --max-time 25 -X POST "${API}/auth/verify" \
-    -H 'Content-Type: application/json' \
-    -d "{\"code\":\"${!variable}\"}" | valeur_json roles)"
+  if [ "${IP_BLOQUEE}" -eq 1 ]; then
+    ignore "${variable}" "adresse IP bloquée, contrôle reporté"
+    return
+  fi
+
+  ROLES_TESTES=$((ROLES_TESTES + 1))
+
+  local reponse code roles
+  reponse="$(curl -s -w '\n%{http_code}' --max-time 25 -X POST "${API}/auth/verify" \
+    -H 'Content-Type: application/json' -d "{\"code\":\"${!variable}\"}")"
+  code="$(printf '%s' "${reponse}" | tail -n 1)"
+  roles="$(printf '%s' "${reponse}" | sed '$d' | valeur_json roles)"
+
+  if [ "${code}" = "429" ]; then
+    IP_BLOQUEE=1
+    ignore "${variable}" "adresse IP bloquée par le plafond d'essais"
+    return
+  fi
 
   if printf '%s' "${roles}" | grep -q "${role_attendu}"; then
     printf '  %s✓%s %-52s %s\n' "${VERT}" "${NEUTRE}" "${variable}" "${roles}"
     REUSSIS=$((REUSSIS + 1))
+    ROLES_RECONNUS=$((ROLES_RECONNUS + 1))
   else
-    printf '  %s✗%s %-52s « %s » (attendu %s)\n' "${ROUGE}" "${NEUTRE}" "${variable}" "${roles}" "${role_attendu}"
+    printf '  %s✗%s %-52s refusé par le serveur (HTTP %s)\n' \
+      "${ROUGE}" "${NEUTRE}" "${variable}" "${code}"
     ECHOUES=$((ECHOUES + 1))
   fi
 }
@@ -151,10 +183,27 @@ controler_role CENSEUR_PASSWORD censeur
 controler_role INTENDANT_PASSWORD intendant
 controler_role COMPETITIONS_PASSWORD competitions
 
+# Aucun code reconnu : inutile de dérouler la suite, tout échouerait de la même
+# façon. Un diagnostic vaut mieux que vingt lignes rouges identiques.
+if [ "${ROLES_TESTES}" -gt 0 ] && [ "${ROLES_RECONNUS}" -eq 0 ]; then
+  CODES_ABSENTS=1
+  cat <<DIAGNOSTIC
+
+  ${JAUNE}Aucun des codes fournis n'est reconnu par le serveur.${NEUTRE}
+  Les codes exportés ici doivent AUSSI figurer dans le .env de l'instance :
+
+    ssh -i sde-api-key.pem ubuntu@<IP>
+    grep '_PASSWORD=' ~/sante-extremes/backend/.env
+    # puis, si besoin, les y ajouter et : sudo systemctl restart sde-api
+DIAGNOSTIC
+fi
+
 ###############################################################################
 titre "Cloisonnement des rôles"
 ###############################################################################
-if manque_code TRESORIER_PASSWORD; then
+if [ "${CODES_ABSENTS}" -eq 1 ] || [ "${IP_BLOQUEE}" -eq 1 ]; then
+  ignore "cloisonnement des rôles" "codes absents du serveur, ou IP bloquée"
+elif manque_code TRESORIER_PASSWORD; then
   ignore "trésorier sur une route secrétaire" "TRESORIER_PASSWORD absent"
 else
   verifier "trésorier sur GET /admin/members" "401" \
@@ -166,14 +215,18 @@ else
     -H "Authorization: Bearer ${TRESORIER_PASSWORD}" "${API}/documents/fiche-sante/1"
 fi
 
-if manque_code SECRETAIRE_PASSWORD; then
+if [ "${CODES_ABSENTS}" -eq 1 ] || [ "${IP_BLOQUEE}" -eq 1 ]; then
+  :
+elif manque_code SECRETAIRE_PASSWORD; then
   ignore "secrétaire sur GET /admin/members" "SECRETAIRE_PASSWORD absent"
 else
   verifier "secrétaire sur GET /admin/members" "200" \
     -H "Authorization: Bearer ${SECRETAIRE_PASSWORD}" "${API}/admin/members"
 fi
 
-if manque_code TRESORIER_PASSWORD; then
+if [ "${CODES_ABSENTS}" -eq 1 ] || [ "${IP_BLOQUEE}" -eq 1 ]; then
+  :
+elif manque_code TRESORIER_PASSWORD; then
   ignore "trésorier sur /cotisations/en-attente" "TRESORIER_PASSWORD absent"
 else
   verifier "trésorier sur /cotisations/en-attente" "200" \
@@ -194,6 +247,8 @@ titre "Chaîne des dépenses"
 ###############################################################################
 if [ "${LECTURE_SEULE}" -eq 1 ]; then
   ignore "création et décaissement d'une demande" "mode lecture seule"
+elif [ "${CODES_ABSENTS}" -eq 1 ] || [ "${IP_BLOQUEE}" -eq 1 ]; then
+  ignore "création et décaissement d'une demande" "codes absents du serveur, ou IP bloquée"
 elif manque_code INTENDANT_PASSWORD || manque_code TRESORIER_PASSWORD; then
   ignore "création et décaissement d'une demande" "codes intendant ou trésorier absents"
 else
@@ -256,7 +311,9 @@ fi
 ###############################################################################
 titre "Plafond d'essais (bloque l'adresse IP quinze minutes)"
 ###############################################################################
-if [ "${AVEC_BLOCAGE}" -ne 1 ]; then
+if [ "${IP_BLOQUEE}" -eq 1 ]; then
+  ignore "plafond d'essais" "déjà déclenché plus haut — il fonctionne"
+elif [ "${AVEC_BLOCAGE}" -ne 1 ]; then
   ignore "cinq codes erronés puis 429" "passer --avec-blocage pour l'exécuter"
 else
   printf '  %s!%s votre IP va être bloquée quinze minutes\n' "${JAUNE}" "${NEUTRE}"
