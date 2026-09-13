@@ -196,6 +196,92 @@ n'aura pas d'accès S3 (voir ci-dessous).
 
 ---
 
+## H. Déclaration de paiement par le membre
+
+Ajouté après la première livraison. Le membre déclare lui-même son versement, reçu à l'appui ; le
+trésorier tranche.
+
+### Modèle
+
+Migration **additive** de `cotisations` : `statut` (`validee` | `en_attente` | `refusee`, défaut
+`validee`), `motif_refus`, `date_validation`, `cle_s3`, plus un index `(member_id, statut)`.
+
+> **L'ordre de la migration compte.** Les colonnes sont ajoutées **avant** l'application de
+> `schema.sql`, qui crée un index sur `statut`. Dans l'autre sens, sur une base antérieure, le script
+> entier échoue — y compris les instructions censées créer cette colonne. Le premier essai est tombé
+> exactement là. Vérifié ensuite sur une base reconstituée au format LOT 1 : quatre colonnes
+> ajoutées, lignes existantes préservées et passées à `validee`.
+
+### Routes
+
+| Méthode | Route | Rôle |
+| --- | --- | --- |
+| `POST` | `/api/cotisations/declarer` | **public** — reçu obligatoire, 10 par IP et par heure, 409 si le mois est déjà réglé ou déjà déclaré |
+| `GET` | `/api/cotisations/en-attente` | trésorier — file de validation, URL pré-signée du reçu |
+| `GET` | `/api/cotisations/:id/justificatif` | trésorier |
+| `POST` | `/api/cotisations/:id/valider` | trésorier |
+| `POST` | `/api/cotisations/:id/refuser` | trésorier — motif obligatoire |
+
+**Règle tenue de bout en bout** : une déclaration en attente ne compte **nulle part** — ni dans le
+total encaissé, ni dans le statut du mois, ni dans `/api/historique`, ni dans les exports. Toutes les
+requêtes concernées filtrent `statut = 'validee'`.
+
+`/api/stats` expose désormais, par membre, `statut_mois` (`paye` | `en_attente` | `impaye`) et
+`motif_refus` — ce dernier seulement si le membre est impayé, un membre à jour n'ayant pas à être
+notifié d'un refus sans objet.
+
+### Application
+
+Bouton rouge « Déclarer mon paiement » sur l'écran État, ouvert à tous sans code. Trois états par
+membre : coche verte, pastille orange `#EF9F27`, point rouge ; motif en rouge en cas de refus.
+Écran Paiement à deux onglets internes, « Saisir » et « À valider (N) », avec badge sur la barre du
+bas. **Le reçu n'est visible que dans « À valider »** : ailleurs, seul le statut est publié.
+
+---
+
+## I. Trésorerie visible de tous
+
+`GET /api/tresorerie?annee=` — **publique**, accessible depuis l'icône portefeuille du bandeau de
+l'écran État.
+
+### Définition retenue
+
+> **Solde réel = cotisations validées + pénalités encaissées.**
+
+C'est le seul endroit de l'application où les deux comptabilités sont **réunies**. Partout ailleurs —
+État, Historique, exports — les pénalités restent tenues à part des cotisations, et c'est voulu : on
+y suit le respect des cotisations, pas la caisse. Ici on regarde la caisse, et elle contient bien les
+deux. L'écran affiche donc la composition ligne à ligne, pour que les deux lectures ne se confondent
+jamais.
+
+Sont annoncées **à part**, comme attendues et non encaissées : les pénalités dues et les déclarations
+en attente de validation.
+
+La réponse porte le solde, sa composition, le détail de l'exercice demandé, la répartition mensuelle
+et les vingt derniers mouvements — cotisations et pénalités confondues, en ordre chronologique, parce
+qu'un relevé de caisse se lit d'une seule traite.
+
+### Vérification
+
+| Cas | Attendu | Obtenu |
+| --- | --- | --- |
+| `GET /api/tresorerie` sans code | 200 | ✅ 200 |
+| Solde = 17 500 cotisations + 5 000 pénalité réglée | 22 500 | ✅ 22 500 |
+| Pénalité due non comptée en caisse | dans `attendu` | ✅ 3 000 |
+| `/api/stats` et `/api/historique` inchangés | 17 500 | ✅ 17 500 — les deux comptabilités restent séparées ailleurs |
+| `POST /api/cotisations/declarer` sans fichier | 400 | ✅ « Le reçu de paiement est obligatoire » |
+| Déclaration en doublon sur un mois réglé | 409 | ✅ |
+| `valider` / `en-attente` / `justificatif` sans code | 401 | ✅ |
+| `refuser` sans motif | 400 | ✅ |
+| Après validation d'une déclaration | totaux à jour | ✅ 10 000 → 17 500, membre `en_attente` → `paye` |
+| Motif de refus remonté sur un membre impayé | visible | ✅ |
+
+**Dépendance à surveiller** : la déclaration repose entièrement sur le dépôt du reçu. Sans accès S3
+sur l'instance, **elle échouera en 500** — c'est la fonction la plus exposée au point de blocage
+ci-dessous.
+
+---
+
 ## Point de blocage à traiter : l'instance EC2 n'a pas d'accès S3
 
 Ni clés dans `.env`, ni rôle IAM attaché. En l'état, **les justificatifs de paiement, le règlement
@@ -243,12 +329,12 @@ Le SDK détecte seul le rôle : aucune clé ne doit être écrite dans `.env`.
 
 ## Résumé pour l'architecte
 
-1. **Backend** : quatre rôles par code (`exigerRole`), `POST /api/auth/verify`, sanctions et pénalités (comptées **à part** des cotisations), `GET /api/historique?annee=`, exports `.xlsx` / `.pdf`, règlement intérieur et fiches santé sur S3 via URL pré-signées. Migration SQLite additive, LOT 1 intact.
-2. **Flutter** : cinq onglets, charte charbon/rouge/crème, Manrope, un seul bandeau par écran, codes de rôle mémorisés localement.
+1. **Backend** : quatre rôles par code (`exigerRole`), `POST /api/auth/verify`, sanctions et pénalités (comptées **à part** des cotisations), `GET /api/historique?annee=`, exports `.xlsx` / `.pdf`, règlement intérieur et fiches santé sur S3 via URL pré-signées, **déclaration de paiement par le membre** (en attente jusqu'à validation du trésorier) et **`GET /api/tresorerie` publique**. Migration SQLite additive, LOT 1 intact.
+2. **Flutter** : cinq onglets, charte charbon/rouge/crème, Manrope, un seul bandeau par écran, codes mémorisés localement, déclaration ouverte à tous, file « À valider » du trésorier, écran Trésorerie public.
 3. **Sur l'instance**, dans l'ordre :
    `cd ~/sante-extremes/backend && git pull && npm install`
    puis ajouter dans `.env` : `ADMIN_PASSWORD=SDE-Admin-26`, `TRESORIER_PASSWORD=SDE-Tresor-26`, `SECRETAIRE_PASSWORD=SDE-Secretaire-26`, `CENSEUR_PASSWORD=SDE-Censeur-26`
    puis `npm run migrate && sudo systemctl restart sde-api`
-4. **Tester** : `curl -X POST https://sde-api.atlastech.cm/api/auth/verify -H 'Content-Type: application/json' -d '{"code":"SDE-Tresor-26"}'` → `{"roles":["tresorier"]}` ; sans code sur `/api/cotisations` → 401 ; `GET /api/historique` → 200 ; `GET /api/export/historique.pdf?annee=2026` → 200 `application/pdf`.
-5. **Bloquant S3** : l'instance n'a **ni clés ni rôle IAM**. Justificatifs, règlement et fiches santé échoueront en 500 tant qu'un rôle portant `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject` sur `arn:aws:s3:::<BUCKET>/*` et `s3:ListBucket` sur `arn:aws:s3:::<BUCKET>` ne lui est pas attaché (commandes ci-dessus).
+4. **Tester** : `curl -X POST https://sde-api.atlastech.cm/api/auth/verify -H 'Content-Type: application/json' -d '{"code":"SDE-Tresor-26"}'` → `{"roles":["tresorier"]}` ; sans code sur `/api/cotisations` → 401 ; `GET /api/historique` → 200 ; `GET /api/tresorerie` → 200 (solde = cotisations validées + pénalités encaissées) ; `GET /api/export/historique.pdf?annee=2026` → 200 `application/pdf`.
+5. **Bloquant S3** : l'instance n'a **ni clés ni rôle IAM**. Justificatifs, règlement, fiches santé **et déclarations de paiement** échoueront en 500 tant qu'un rôle portant `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject` sur `arn:aws:s3:::<BUCKET>/*` et `s3:ListBucket` sur `arn:aws:s3:::<BUCKET>` ne lui est pas attaché (commandes ci-dessus). La déclaration par le membre est la fonction la plus exposée : elle repose entièrement sur le dépôt du reçu.
 6. **Changer les quatre codes** avant l'assemblée : ceux du point 3 sont des valeurs de mise en service, connues de toute personne lisant ce document.

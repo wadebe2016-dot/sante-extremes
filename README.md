@@ -133,11 +133,17 @@ d'environnement est vide n'est jamais accordé.
 | `GET` | `/api/stats` | — | 200 |
 | `GET` | `/api/historique?annee=` | — | 200 · 400 |
 | `GET` | `/api/sanctions?statut=&annee=` | — | 200 · 400 |
+| `GET` | `/api/tresorerie?annee=` | — | 200 · 400 |
+| `POST` | `/api/cotisations/declarer` | — | 201 · 400 · 404 · 409 · 413 · 429 |
 | `GET` | `/api/export/historique.xlsx?annee=` | — | 200 · 400 |
 | `GET` | `/api/export/historique.pdf?annee=` | — | 200 · 400 |
 | `GET` | `/api/documents/reglement` | — | 200 · 404 |
 | `POST` | `/api/cotisations` | trésorier | 201 · 400 · 401 · 404 · 413 |
 | `POST` | `/api/penalites/:id/regler` | trésorier | 200 · 400 · 401 · 404 · 409 |
+| `GET` | `/api/cotisations/en-attente` | trésorier | 200 · 401 |
+| `GET` | `/api/cotisations/:id/justificatif` | trésorier | 200 · 401 · 404 |
+| `POST` | `/api/cotisations/:id/valider` | trésorier | 200 · 401 · 404 · 409 |
+| `POST` | `/api/cotisations/:id/refuser` | trésorier | 200 · 400 · 401 · 404 · 409 |
 | `GET` | `/api/admin/members` | secrétaire | 200 · 401 |
 | `POST` | `/api/admin/members` | secrétaire | 201 · 400 · 401 · 409 |
 | `DELETE` | `/api/admin/members/:id` | secrétaire | 200 · 400 · 401 · 404 |
@@ -156,9 +162,19 @@ Sert à l'application pour savoir quels onglets déverrouiller, sans exécuter d
 `moyen` (`Mobile Money` ou `Espèce`, accents et casse tolérés), `mois` (`AAAA-MM`, **facultatif** —
 rattrapage, un mois futur est refusé), `fichier` (image, 5 Mo max, **facultatif**).
 
-> **Pénalités et cotisations ne se mélangent jamais.** Le règlement d'une pénalité
-> (`POST /api/penalites/:id/regler`) n'entre ni dans `/api/historique`, ni dans le total encaissé,
-> ni dans le statut payé/impayé du mois.
+**`POST /api/cotisations/declarer`** — déclaration par le membre, **publique**. `multipart/form-data` :
+`member_id`, `mois` (`AAAA-MM`), `montant`, `moyen`, `fichier` (image ou PDF, 5 Mo, **obligatoire**).
+La cotisation naît `en_attente` et ne compte nulle part avant validation par le trésorier.
+Plafond de 10 déclarations par IP et par heure ; 409 si le mois est déjà réglé ou déjà déclaré.
+
+**`GET /api/tresorerie?annee=`** — situation de caisse, **publique** :
+`solde_reel = cotisations validées + pénalités encaissées`, sa composition, le détail de l'exercice,
+la répartition mensuelle et les vingt derniers mouvements. Pénalités dues et déclarations en attente
+figurent à part, comme attendues.
+
+> **Pénalités et cotisations ne se mélangent jamais** — sauf dans `/api/tresorerie`, qui donne
+> la caisse. Le règlement d'une pénalité (`POST /api/penalites/:id/regler`) n'entre ni dans
+> `/api/historique`, ni dans le total encaissé de `/api/stats`, ni dans le statut payé/impayé du mois.
 
 ```json
 {

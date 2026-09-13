@@ -20,6 +20,7 @@ const routesHistorique = require('./routes/historique');
 const routesPenalites = require('./routes/penalites');
 const routesSanctions = require('./routes/sanctions');
 const routesStats = require('./routes/stats');
+const routesTresorerie = require('./routes/tresorerie');
 
 const PORT = Number(process.env.PORT || 3000);
 const application = express();
@@ -60,6 +61,7 @@ application.get('/api/health', (requete, reponse) => {
 // Routes publiques : consultation et exports, aucun code requis
 application.use('/api/stats', routesStats);
 application.use('/api/historique', routesHistorique);
+application.use('/api/tresorerie', routesTresorerie);
 application.use('/api/export', routesExport);
 
 // Vérification d'un code de rôle (aucune action métier)
