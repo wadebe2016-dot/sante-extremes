@@ -100,23 +100,65 @@ automatiquement au démarrage ; `npm run migrate` sert à initialiser la base sa
 | `AWS_REGION` | Région du bucket (`eu-west-3`) |
 | `AWS_BUCKET` | Nom du bucket des justificatifs |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Identifiants IAM — omissibles si un rôle IAM est attaché |
-| `ADMIN_PASSWORD` | Jeton Bearer des routes d'administration |
+| `ADMIN_PASSWORD` | Code du rôle admin — ouvre toutes les routes |
+| `TRESORIER_PASSWORD` | Code du rôle trésorier |
+| `SECRETAIRE_PASSWORD` | Code du rôle secrétaire |
+| `CENSEUR_PASSWORD` | Code du rôle censeur |
 | `S3_MAX_FILE_SIZE` | Taille maximale d'un justificatif, en octets (défaut 5 Mo) |
+| `S3_MAX_DOCUMENT_SIZE` | Taille maximale d'un document, en octets (défaut 10 Mo) |
+| `S3_URL_DUREE_SECONDES` | Validité des URL pré-signées (défaut 600 s) |
 
 Aucun secret n'est écrit en dur dans le code, et `.env` n'est jamais versionné.
 
+### Rôles (LOT 3)
+
+L'association ne gère pas de comptes nominatifs : chaque fonction partage un code, transmis en
+`Authorization: Bearer <code>`. **Le code admin ouvre toutes les routes.** Un rôle dont la variable
+d'environnement est vide n'est jamais accordé.
+
+| Rôle | Droits |
+| --- | --- |
+| Membre (tous) | Consulter État, Historique, Sanctions ; exporter ; lire le règlement intérieur |
+| Trésorier | Enregistrer les cotisations ; encaisser les pénalités |
+| Secrétaire | Ajouter / retirer des membres ; règlement intérieur ; fiches santé |
+| Censeur | Infliger, lever et annuler les sanctions |
+| Admin | Tout ce qui précède |
+
 ### API
 
-| Méthode | Route | Auth | Codes |
+| Méthode | Route | Rôle | Codes |
 | --- | --- | --- | --- |
 | `GET` | `/api/health` | — | 200 |
-| `POST` | `/api/admin/members` | Bearer | 201 · 400 · 401 · 409 |
-| `DELETE` | `/api/admin/members/:id` | Bearer | 200 · 400 · 401 · 404 |
-| `POST` | `/api/cotisations` | — | 201 · 400 · 404 · 413 · 500 |
+| `POST` | `/api/auth/verify` | — | 200 · 400 · 401 · 429 |
 | `GET` | `/api/stats` | — | 200 |
+| `GET` | `/api/historique?annee=` | — | 200 · 400 |
+| `GET` | `/api/sanctions?statut=&annee=` | — | 200 · 400 |
+| `GET` | `/api/export/historique.xlsx?annee=` | — | 200 · 400 |
+| `GET` | `/api/export/historique.pdf?annee=` | — | 200 · 400 |
+| `GET` | `/api/documents/reglement` | — | 200 · 404 |
+| `POST` | `/api/cotisations` | trésorier | 201 · 400 · 401 · 404 · 413 |
+| `POST` | `/api/penalites/:id/regler` | trésorier | 200 · 400 · 401 · 404 · 409 |
+| `GET` | `/api/admin/members` | secrétaire | 200 · 401 |
+| `POST` | `/api/admin/members` | secrétaire | 201 · 400 · 401 · 409 |
+| `DELETE` | `/api/admin/members/:id` | secrétaire | 200 · 400 · 401 · 404 |
+| `POST` | `/api/documents/reglement` | secrétaire | 201 · 400 · 401 |
+| `GET` | `/api/documents/fiche-sante/:id` | secrétaire | 200 · 401 · 404 |
+| `POST` | `/api/documents/fiche-sante/:id` | secrétaire | 201 · 400 · 401 · 404 |
+| `DELETE` | `/api/documents/fiche-sante/:id` | secrétaire | 200 · 401 · 404 |
+| `POST` | `/api/sanctions` | censeur | 201 · 400 · 401 · 404 |
+| `POST` | `/api/sanctions/:id/lever` | censeur | 200 · 400 · 401 · 404 · 409 |
+| `DELETE` | `/api/sanctions/:id` | censeur | 200 · 400 · 401 · 404 · 409 |
+
+**`POST /api/auth/verify`** — `{ "code": "…" }` → `200 { "roles": ["tresorier"] }` ou `401`.
+Sert à l'application pour savoir quels onglets déverrouiller, sans exécuter d'action.
 
 **`POST /api/cotisations`** — `multipart/form-data` : `member_id` (entier), `montant` (nombre > 0),
-`moyen` (`Mobile Money` ou `Espèce`, accents et casse tolérés), `fichier` (image, 5 Mo max, **facultatif**).
+`moyen` (`Mobile Money` ou `Espèce`, accents et casse tolérés), `mois` (`AAAA-MM`, **facultatif** —
+rattrapage, un mois futur est refusé), `fichier` (image, 5 Mo max, **facultatif**).
+
+> **Pénalités et cotisations ne se mélangent jamais.** Le règlement d'une pénalité
+> (`POST /api/penalites/:id/regler`) n'entre ni dans `/api/historique`, ni dans le total encaissé,
+> ni dans le statut payé/impayé du mois.
 
 ```json
 {
@@ -264,20 +306,45 @@ l'application n'embarque pas de certificat.
 cd backend && npm install && cp .env.example .env && npm run migrate && npm start
 ```
 
-### 5.2 Tester les 4 routes
+### 5.2 Tester les routes par rôle
+
+Les codes ci-dessous sont ceux de `.env` ; ne jamais les écrire dans un script versionné.
 
 ```bash
-curl -X POST http://localhost:3000/api/admin/members \
-  -H "Authorization: Bearer sde+691234567" -H "Content-Type: application/json" \
-  -d '{"name":"Alice"}'
+API=http://localhost:3000/api
+SEC="Authorization: Bearer $SECRETAIRE_PASSWORD"
+TRE="Authorization: Bearer $TRESORIER_PASSWORD"
+CEN="Authorization: Bearer $CENSEUR_PASSWORD"
 
-curl -X POST http://localhost:3000/api/cotisations \
-  -F "member_id=1" -F "montant=5000" -F "moyen=Mobile Money"
+# Vérification d'un code → { "roles": ["tresorier"] }
+curl -X POST $API/auth/verify -H 'Content-Type: application/json' \
+  -d "{\"code\":\"$TRESORIER_PASSWORD\"}"
 
-curl http://localhost:3000/api/stats
+# Sans code, ou avec un mauvais code → 401
+curl -i -X POST $API/cotisations
+curl -i -X POST $API/cotisations -H 'Authorization: Bearer FAUX'
 
-curl -X DELETE http://localhost:3000/api/admin/members/1 \
-  -H "Authorization: Bearer sde+691234567"
+# Secrétaire : membres
+curl -X POST $API/admin/members -H "$SEC" -H 'Content-Type: application/json' -d '{"name":"Alice"}'
+curl $API/admin/members -H "$SEC"
+
+# Trésorier : cotisation, puis rattrapage sur un mois antérieur
+curl -X POST $API/cotisations -H "$TRE" -F 'member_id=1' -F 'montant=5000' -F 'moyen=Mobile Money'
+curl -X POST $API/cotisations -H "$TRE" -F 'member_id=1' -F 'montant=5000' -F 'moyen=Espece' -F 'mois=2026-03'
+
+# Censeur : sanctions
+curl -X POST $API/sanctions -H "$CEN" -H 'Content-Type: application/json' \
+  -d '{"member_id":1,"type":"penalite","motif":"retard","montant":5000}'
+
+# Trésorier : encaissement d'une pénalité (ne bouge PAS le total des cotisations)
+curl -X POST $API/penalites/1/regler -H "$TRE" -F 'moyen=Espece'
+
+# Lectures publiques et exports
+curl $API/stats
+curl "$API/historique?annee=2026"
+curl "$API/sanctions?statut=toutes"
+curl -o historique.xlsx "$API/export/historique.xlsx?annee=2026"
+curl -o historique.pdf  "$API/export/historique.pdf?annee=2026"
 ```
 
 ### 5.3 Générer l'APK

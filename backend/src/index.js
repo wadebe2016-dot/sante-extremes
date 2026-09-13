@@ -12,14 +12,34 @@ const cors = require('cors');
 
 const { migrer, fermerBd } = require('./db');
 const routesAdmin = require('./routes/admin');
+const routesAuth = require('./routes/auth');
 const routesCotisations = require('./routes/cotisations');
+const routesDocuments = require('./routes/documents');
+const routesExport = require('./routes/export');
+const routesHistorique = require('./routes/historique');
+const routesPenalites = require('./routes/penalites');
+const routesSanctions = require('./routes/sanctions');
 const routesStats = require('./routes/stats');
 
 const PORT = Number(process.env.PORT || 3000);
 const application = express();
 
-// L'application mobile appelle l'API depuis le réseau local : CORS ouvert en lecture/écriture
-application.use(cors());
+// L'application mobile n'est pas soumise au CORS ; la restriction ne concerne
+// que le tableau public consulté depuis un navigateur. CORS_ORIGINS accepte une
+// liste séparée par des virgules, « * » (défaut) laissant tout passer.
+const originesAutorisees = (process.env.CORS_ORIGINS || '*')
+  .split(',')
+  .map((valeur) => valeur.trim())
+  .filter(Boolean);
+
+application.use(
+  cors({
+    origin: originesAutorisees.includes('*') ? true : originesAutorisees,
+  })
+);
+
+// Derrière l'ALB : X-Forwarded-For / X-Forwarded-Proto sont ceux du load balancer
+application.set('trust proxy', true);
 application.use(express.json({ limit: '1mb' }));
 application.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
@@ -37,9 +57,20 @@ application.get('/api/health', (requete, reponse) => {
   reponse.status(200).json({ status: 'ok', service: 'sante-extremes-backend' });
 });
 
-application.use('/api/admin', routesAdmin);
-application.use('/api/cotisations', routesCotisations);
+// Routes publiques : consultation et exports, aucun code requis
 application.use('/api/stats', routesStats);
+application.use('/api/historique', routesHistorique);
+application.use('/api/export', routesExport);
+
+// Vérification d'un code de rôle (aucune action métier)
+application.use('/api/auth', routesAuth);
+
+// Routes protégées : le contrôle du rôle est posé dans chaque routeur
+application.use('/api/admin', routesAdmin); // secrétaire
+application.use('/api/cotisations', routesCotisations); // trésorier
+application.use('/api/penalites', routesPenalites); // trésorier
+application.use('/api/sanctions', routesSanctions); // lecture publique, écriture censeur
+application.use('/api/documents', routesDocuments); // règlement public, fiches santé secrétaire
 
 // Route inconnue
 application.use((requete, reponse) => {

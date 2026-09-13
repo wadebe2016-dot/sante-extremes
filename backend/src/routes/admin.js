@@ -1,18 +1,37 @@
 /**
- * Routes d'administration des membres — protégées par un jeton Bearer.
- *   POST   /api/admin/members      → ajoute un membre
- *   DELETE /api/admin/members/:id  → supprime un membre (et ses cotisations)
+ * Gestion des membres — Santé des extrêmes.
+ *   GET    /api/admin/members       liste des membres (id + nom)
+ *   POST   /api/admin/members       création d'un membre
+ *   DELETE /api/admin/members/:id   suppression d'un membre
+ *
+ * LOT 3 : ces routes relèvent du secrétariat. Le code secrétaire y donne accès,
+ * le code admin également (tous les droits).
  */
 'use strict';
 
 const express = require('express');
-const { executer, lireUne } = require('../db');
-const { verifierAdmin } = require('../middleware/auth');
+const { executer, lireUne, lireToutes } = require('../db');
+const { exigerRole } = require('../middleware/auth');
 
 const routeur = express.Router();
 
-// Toutes les routes de ce routeur exigent le jeton administrateur
-routeur.use(verifierAdmin);
+// Toutes les routes de ce routeur sont réservées au secrétariat.
+routeur.use(exigerRole('secretaire'));
+
+/** GET /api/admin/members — liste des membres, triée par nom */
+routeur.get('/members', async (requete, reponse) => {
+  try {
+    const membres = await lireToutes(
+      'SELECT id, name FROM members ORDER BY name COLLATE NOCASE ASC'
+    );
+
+    console.log(`[admin] liste des membres servie : ${membres.length} membre(s)`);
+    return reponse.status(200).json({ members: membres });
+  } catch (erreur) {
+    console.error(`[admin] erreur à la lecture des membres : ${erreur.message}`);
+    return reponse.status(500).json({ error: 'Impossible de charger la liste des membres' });
+  }
+});
 
 /** POST /api/admin/members — création d'un membre */
 routeur.post('/members', async (requete, reponse) => {
@@ -44,7 +63,12 @@ routeur.post('/members', async (requete, reponse) => {
   }
 });
 
-/** DELETE /api/admin/members/:id — suppression d'un membre */
+/**
+ * DELETE /api/admin/members/:id — suppression d'un membre
+ *
+ * Les cotisations, sanctions et fiches santé du membre partent en cascade
+ * (ON DELETE CASCADE) : le retrait d'un membre efface tout son historique.
+ */
 routeur.delete('/members/:id', async (requete, reponse) => {
   const identifiant = Number.parseInt(requete.params.id, 10);
 

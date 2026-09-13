@@ -1,12 +1,18 @@
 /**
  * Route d'enregistrement des paiements de cotisation.
- *   POST /api/cotisations  (multipart/form-data : member_id, montant, moyen, fichier)
+ *   POST /api/cotisations  (trésorier — multipart/form-data)
+ *   champs : member_id, montant, moyen, mois (facultatif), fichier (facultatif)
+ *
  * Le justificatif est déposé sur S3, puis la cotisation est écrite en base.
+ *
+ * LOT 3 : la route passe sous le code trésorier, et accepte un mois de
+ * rattrapage (saisie d'un paiement reçu au titre d'un mois antérieur).
  */
 'use strict';
 
 const express = require('express');
 const { executer, lireUne } = require('../db');
+const { exigerRole } = require('../middleware/auth');
 const {
   recevoirJustificatif,
   televerserJustificatif,
@@ -33,17 +39,48 @@ function normaliserMoyen(valeur) {
   return null;
 }
 
+/**
+ * Convertit un mois de rattrapage « AAAA-MM » en date de paiement.
+ *
+ * On retient le 5 du mois à 12:00Z : une date en milieu de journée et de
+ * première semaine reste dans le bon mois quel que soit le fuseau de lecture,
+ * là où le 1ᵉʳ à minuit basculerait sur le mois précédent à l'ouest de Greenwich.
+ *
+ * @param {string} valeur mois demandé, au format AAAA-MM
+ * @returns {{date: string}|{erreur: string}} date ISO à enregistrer, ou motif de refus
+ */
+function convertirMoisEnDate(valeur) {
+  const mois = String(valeur || '').trim();
+
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(mois)) {
+    return { erreur: 'Mois invalide (format attendu : AAAA-MM)' };
+  }
+
+  const moisCourant = new Date().toISOString().slice(0, 7);
+  if (mois > moisCourant) {
+    // Comparaison lexicographique : le format AAAA-MM la rend équivalente à une
+    // comparaison chronologique.
+    return { erreur: 'Impossible d’enregistrer un paiement pour un mois à venir' };
+  }
+
+  return { date: `${mois}-05T12:00:00Z` };
+}
+
 routeur.post(
   '/',
-  // 1. Réception du fichier en mémoire (images, 5 Mo max)
+  // 1. Contrôle du code trésorier AVANT de lire le fichier : inutile de
+  //    téléverser quoi que ce soit si l'appelant n'est pas autorisé.
+  exigerRole('tresorier'),
+  // 2. Réception du fichier en mémoire (images, 5 Mo max)
   (requete, reponse, suite) => recevoirJustificatif(requete, reponse, (erreur) =>
     gererErreursUpload(erreur, requete, reponse, suite)
   ),
-  // 2. Validation, dépôt S3 puis écriture en base
+  // 3. Validation, dépôt S3 puis écriture en base
   async (requete, reponse) => {
     const idMembre = Number.parseInt(requete.body?.member_id, 10);
     const montant = Number.parseFloat(requete.body?.montant);
     const moyen = normaliserMoyen(requete.body?.moyen);
+    const moisDemande = requete.body?.mois;
 
     if (!Number.isInteger(idMembre) || idMembre <= 0) {
       console.warn(`[cotisations] refus : member_id invalide « ${requete.body?.member_id} »`);
@@ -62,6 +99,17 @@ routeur.post(
         .json({ error: `Moyen de paiement invalide (attendu : ${MOYENS_AUTORISES.join(' ou ')})` });
     }
 
+    // Mois facultatif : absent, la cotisation est datée de maintenant (défaut SQL).
+    let datePaiement = null;
+    if (moisDemande !== undefined && moisDemande !== null && String(moisDemande).trim() !== '') {
+      const conversion = convertirMoisEnDate(moisDemande);
+      if (conversion.erreur) {
+        console.warn(`[cotisations] refus : mois « ${moisDemande} » — ${conversion.erreur}`);
+        return reponse.status(400).json({ error: conversion.erreur });
+      }
+      datePaiement = conversion.date;
+    }
+
     try {
       const membre = await lireUne('SELECT id, name FROM members WHERE id = ?', [idMembre]);
       if (!membre) {
@@ -77,18 +125,24 @@ routeur.post(
         console.log(`[cotisations] paiement sans justificatif pour le membre #${idMembre}`);
       }
 
-      const resultat = await executer(
-        'INSERT INTO cotisations (member_id, montant, moyen, fichier_s3_url) VALUES (?, ?, ?, ?)',
-        [idMembre, montant, moyen, urlJustificatif]
-      );
+      const resultat = datePaiement
+        ? await executer(
+            'INSERT INTO cotisations (member_id, montant, moyen, fichier_s3_url, date_paiement) VALUES (?, ?, ?, ?, ?)',
+            [idMembre, montant, moyen, urlJustificatif, datePaiement]
+          )
+        : await executer(
+            'INSERT INTO cotisations (member_id, montant, moyen, fichier_s3_url) VALUES (?, ?, ?, ?)',
+            [idMembre, montant, moyen, urlJustificatif]
+          );
 
       const cotisation = await lireUne(
         'SELECT id, member_id, montant, moyen, fichier_s3_url, date_paiement FROM cotisations WHERE id = ?',
         [resultat.id]
       );
 
+      const mention = datePaiement ? ` — rattrapage ${String(moisDemande).trim()}` : '';
       console.log(
-        `[cotisations] paiement enregistré : #${cotisation.id} — ${membre.name} — ${montant} (${moyen})`
+        `[cotisations] paiement enregistré : #${cotisation.id} — ${membre.name} — ${montant} (${moyen})${mention}`
       );
       return reponse.status(201).json(cotisation);
     } catch (erreur) {
