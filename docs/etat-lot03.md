@@ -478,6 +478,34 @@ un filtre et une pagination.
 
 ---
 
+## Correction — « téléchargement refusé » (HTTP 403) sur un reçu de paiement
+
+Signalé depuis l'écran « Reçu de paiement » du trésorier. Ce n'était pas un problème de droits : les
+URL pré-signées vivent dix minutes (`S3_URL_DUREE_SECONDES`), or la file « À valider » les fabriquait
+**au chargement de la liste**. Le trésorier qui parcourt ses déclarations puis ouvre un reçu quelques
+minutes plus tard présentait à S3 un lien déjà périmé, et S3 répond 403.
+
+Trois corrections, côté application seulement — le backend et la durée de dix minutes sont inchangés :
+
+1. **URL fabriquée à l'ouverture.** Le plein écran demande la sienne via `GET /api/cotisations/:id/justificatif`
+   (route trésorier, déjà en place) au lieu de réutiliser celle de la liste. Écran de chargement,
+   message d'erreur et bouton « Réessayer » si l'appel échoue. La vignette, elle, garde le lien de la
+   liste : elle s'affiche dans la seconde qui suit.
+2. **Message honnête.** L'ancien écran affirmait « Ce reçu est un document PDF » dès que l'image ne se
+   chargeait pas — conclusion fausse quand le lien avait simplement expiré. La vignette dit maintenant
+   « Toucher pour ouvrir », et le plein écran, qui vient d'obtenir une URL fraîche, peut légitimement
+   conclure « Ce reçu n'est pas une image ». Un 403 au téléchargement s'annonce comme un lien expiré.
+3. **Extension déduite du `Content-Type`.** Sous Android, c'est l'extension qui désigne le lecteur : un
+   reçu enregistré sans elle finissait systématiquement dans le partage. `telechargerEtOuvrir` la
+   complète à partir de l'en-tête de la réponse quand le nom n'en porte pas.
+
+| Cas | Attendu | Obtenu |
+| --- | --- | --- |
+| `flutter analyze` | 0 erreur, 0 avertissement | OK — seuls des `info` de style préexistants |
+| Autres téléchargements (règlement, fiche santé, exports) | URL déjà demandée juste avant | OK — inchangés |
+
+---
+
 ## Point de blocage à traiter : l'instance EC2 n'a pas d'accès S3
 
 Ni clés dans `.env`, ni rôle IAM attaché. En l'état, **les justificatifs de paiement, le règlement
@@ -534,3 +562,4 @@ Le SDK détecte seul le rôle : aucune clé ne doit être écrite dans `.env`.
 7. **Tester** : `/api/auth/verify` avec un code trésorier renvoie son nom ; ce trésorier sur sa propre cotisation → 403, l'autre → 200 ; sanction sur un membre protégé → 403 au censeur, 201 à l'admin ; `PUT /api/tresorerie/solde-ouverture` → 401 sauf admin ; `/api/journal` → 200, sans fiche santé ni clé S3 ; export → `Content-Disposition: Cotisations_2026.pdf`.
 8. **Bloquant S3 inchangé** : sans rôle IAM sur l'instance, justificatifs, règlement, fiches santé, déclarations et pièces de dépense échouent en 500.
 9. **Changer les codes** avant l'assemblée, et ne jamais les transmettre par un canal qui les conserve.
+10. **403 sur un reçu corrigé côté application** : l'URL pré-signée est désormais demandée au moment d'ouvrir le justificatif, plus au chargement de la liste. Rien à déployer sur l'instance.
