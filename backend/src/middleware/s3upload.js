@@ -27,6 +27,85 @@ const DUREE_URL_SIGNEE = Number(process.env.S3_URL_DUREE_SECONDES || 600); // 10
 
 const TYPES_AUTORISES = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'];
 const TYPES_DOCUMENT_AUTORISES = ['application/pdf', 'image/jpeg', 'image/png'];
+const TYPES_RECU_AUTORISES = [...TYPES_AUTORISES, 'application/pdf'];
+
+/**
+ * Detecte le type reel d'un fichier a partir de ses premiers octets.
+ *
+ * Le Content-Type annonce par le client N'EST PAS fiable : un envoi multipart
+ * sans type explicite arrive en « application/octet-stream », et une capture
+ * d'ecran parfaitement valide se voyait refusee. A l'inverse, un .txt renomme
+ * .jpg s'annoncerait « image/jpeg » sans en etre une. Les octets d'en-tete,
+ * eux, ne mentent pas.
+ *
+ * @param {Buffer} tampon contenu du fichier
+ * @returns {string} type MIME detecte, « application/octet-stream » a defaut
+ */
+function detecterType(tampon) {
+  if (!Buffer.isBuffer(tampon) || tampon.length < 4) return 'application/octet-stream';
+
+  // JPEG : FF D8 FF
+  if (tampon[0] === 0xff && tampon[1] === 0xd8 && tampon[2] === 0xff) return 'image/jpeg';
+
+  // PNG : 89 50 4E 47 0D 0A 1A 0A
+  if (tampon.length >= 8 &&
+      tampon.slice(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return 'image/png';
+  }
+
+  // WEBP : « RIFF » .... « WEBP »
+  if (tampon.length >= 12 &&
+      tampon.slice(0, 4).toString('ascii') === 'RIFF' &&
+      tampon.slice(8, 12).toString('ascii') === 'WEBP') {
+    return 'image/webp';
+  }
+
+  // HEIC / HEIF : boite « ftyp » suivie d'une marque connue
+  if (tampon.length >= 12 && tampon.slice(4, 8).toString('ascii') === 'ftyp') {
+    const marque = tampon.slice(8, 12).toString('ascii');
+    if (['heic', 'heix', 'hevc', 'hevx', 'heim', 'heis', 'hevm', 'hevs'].includes(marque)) {
+      return 'image/heic';
+    }
+    if (['mif1', 'msf1'].includes(marque)) return 'image/heif';
+  }
+
+  // PDF : « %PDF »
+  if (tampon.slice(0, 4).toString('ascii') === '%PDF') return 'application/pdf';
+
+  // GIF : detecte pour pouvoir le nommer dans le message de refus
+  if (tampon.slice(0, 4).toString('ascii') === 'GIF8') return 'image/gif';
+
+  // Faute de signature, on distingue au moins le texte du binaire :
+  // « text/plain » est un refus bien plus parlant que « octet-stream ».
+  const echantillon = tampon.slice(0, Math.min(512, tampon.length));
+  const lisible = echantillon.every(
+    (octet) => octet === 0x09 || octet === 0x0a || octet === 0x0d || (octet >= 0x20 && octet !== 0x7f)
+  );
+  return lisible ? 'text/plain' : 'application/octet-stream';
+}
+
+/**
+ * Verifie le type reel du fichier recu et corrige son mimetype.
+ *
+ * Le type detecte remplace celui annonce : c'est lui qui part sur S3 en
+ * ContentType, sans quoi un justificatif valide y serait range en
+ * « octet-stream » et telecharge au lieu d'etre affiche.
+ *
+ * @returns {string|null} message de refus, ou null si le fichier convient
+ */
+function verifierTypeReel(fichier, typesAutorises, description) {
+  if (!fichier || !fichier.buffer) return null; // fichier facultatif absent
+
+  const detecte = detecterType(fichier.buffer);
+
+  if (!typesAutorises.includes(detecte)) {
+    console.warn(`[upload] refus : ${detecte} detecte (annonce ${fichier.mimetype || 'aucun'})`);
+    return `Fichier non ${description} (${detecte} detecte)`;
+  }
+
+  fichier.mimetype = detecte;
+  return null;
+}
 
 let clientS3 = null;
 
@@ -62,64 +141,54 @@ function exigerBucket() {
   return bucket;
 }
 
-/**
- * Filtre multer : seules les images sont acceptées.
- */
-function filtrerImages(requete, fichier, rappel) {
-  if (!TYPES_AUTORISES.includes(fichier.mimetype)) {
-    console.warn(`[upload] type de fichier refusé : ${fichier.mimetype}`);
-    return rappel(new Error('Seules les images sont acceptées (JPEG, PNG, WEBP, HEIC)'));
-  }
-  return rappel(null, true);
-}
-
-/** Filtre multer des documents : PDF ou image. */
-function filtrerDocuments(requete, fichier, rappel) {
-  if (!TYPES_DOCUMENT_AUTORISES.includes(fichier.mimetype)) {
-    console.warn(`[upload] document refusé : ${fichier.mimetype}`);
-    return rappel(new Error('Seuls les fichiers PDF, JPEG et PNG sont acceptés'));
-  }
-  return rappel(null, true);
-}
-
+// Les filtres multer ne filtrent PLUS par type : a ce stade le contenu n'est
+// pas encore lu, et le type annonce n'est pas digne de confiance. La validation
+// se fait apres reception, sur les octets (verifierTypeReel).
 const uploadMemoire = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: TAILLE_MAX, files: 1 },
-  fileFilter: filtrerImages,
 });
 
 const uploadDocument = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: TAILLE_MAX_DOCUMENT, files: 1 },
-  fileFilter: filtrerDocuments,
 });
-
-/**
- * Déclaration d'un membre : le reçu est souvent un PDF envoyé par l'opérateur
- * Mobile Money, pas seulement une photo. Même plafond que les justificatifs.
- */
-function filtrerRecus(requete, fichier, rappel) {
-  if (![...TYPES_AUTORISES, 'application/pdf'].includes(fichier.mimetype)) {
-    console.warn(`[upload] reçu refusé : ${fichier.mimetype}`);
-    return rappel(new Error('Seules les images et les PDF sont acceptés'));
-  }
-  return rappel(null, true);
-}
 
 const uploadRecu = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: TAILLE_MAX, files: 1 },
-  fileFilter: filtrerRecus,
 });
 
-/** Middleware prêt à l'emploi : un seul fichier, champ « fichier ». */
-const recevoirJustificatif = uploadMemoire.single('fichier');
+/**
+ * Construit un middleware « recevoir puis valider ».
+ *
+ * Signature identique a celle d'un middleware multer, pour que les routes
+ * existantes n'aient rien a changer : l'erreur eventuelle est transmise a
+ * gererErreursUpload, qui la traduit en 400.
+ */
+function recevoirEtValider(televerseur, typesAutorises, description) {
+  const recevoir = televerseur.single('fichier');
 
-/** Idem pour une déclaration de paiement (image ou PDF). */
-const recevoirRecu = uploadRecu.single('fichier');
+  return function middleware(requete, reponse, suite) {
+    recevoir(requete, reponse, (erreur) => {
+      if (erreur) return suite(erreur);
 
-/** Idem pour les documents (règlement intérieur, fiche santé). */
-const recevoirDocument = uploadDocument.single('fichier');
+      const probleme = verifierTypeReel(requete.file, typesAutorises, description);
+      if (probleme) return suite(new Error(probleme));
+
+      return suite();
+    });
+  };
+}
+
+/** Justificatif de paiement : images uniquement, 5 Mo. */
+const recevoirJustificatif = recevoirEtValider(uploadMemoire, TYPES_AUTORISES, 'image');
+
+/** Recu de declaration : image ou PDF, 5 Mo. */
+const recevoirRecu = recevoirEtValider(uploadRecu, TYPES_RECU_AUTORISES, 'image ou PDF');
+
+/** Document : reglement interieur ou fiche sante, PDF ou image, 10 Mo. */
+const recevoirDocument = recevoirEtValider(uploadDocument, TYPES_DOCUMENT_AUTORISES, 'PDF, JPEG ou PNG');
 
 /**
  * Construit une clé S3 unique et non devinable pour le justificatif.
@@ -340,6 +409,8 @@ function gererErreursUpload(erreur, requete, reponse, suite) {
 }
 
 module.exports = {
+  detecterType,
+  verifierTypeReel,
   recevoirJustificatif,
   recevoirRecu,
   televerserJustificatif,
