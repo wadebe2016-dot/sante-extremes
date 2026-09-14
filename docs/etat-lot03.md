@@ -383,6 +383,101 @@ construit en local.
 
 ---
 
+## LOT 3 ter — Separation des pouvoirs, solde d'ouverture, depenses, journal
+
+### 1. Trésoriers nominatifs
+
+`TRESORIERS` remplace `TRESORIER_PASSWORD` : une liste « Nom du membre:code ». Les noms doivent
+correspondre **exactement** à ceux de la table `members`.
+
+Nommer les trésoriers n'est pas un confort d'affichage, c'est ce qui rend trois refus possibles.
+Un contrôle anonyme ne pourrait rien empêcher de tel :
+
+| Situation | Réponse |
+| --- | --- |
+| Un trésorier valide, refuse ou saisit **sa propre** cotisation | **403** |
+| Un trésorier se désigne **bénéficiaire** d'un décaissement | **403** |
+| Une sanction vise un membre de `CENSEUR_MEMBRES`, sans code admin | **403** |
+
+`TRESORIER_PASSWORD` reste accepté en repli, mais sans nom aucune de ces protections ne s'applique.
+
+**Traçabilité** : `valide_par`, `encaisse_par`, `approuve_par`, `decaisse_par`, exposées par l'API,
+dans les exports et dans le journal.
+
+Côté application : le bandeau Paiement affiche « Trésorier · Junior », et dans « À valider » la carte
+de sa propre cotisation porte « À faire valider par l'autre trésorier », sans bouton — le serveur
+refuserait en 403, autant le dire avant le geste.
+
+### 2. Solde d'ouverture
+
+Table `parametres`, `PUT /api/tresorerie/solde-ouverture` (**admin**). Le solde ne compte alors que
+les mouvements **à partir de cette date** :
+
+    solde réel = ouverture + cotisations et pénalités depuis la date − décaissements depuis la date
+
+Sans solde défini, tout l'historique est additionné : le comportement d'avant est conservé tel quel.
+L'écran Trésorerie affiche la ligne et son bouton « Définir », avec confirmation — ce montant déplace
+le solde vu par toute l'association, d'où le code admin.
+
+### 3. Onglet Dépenses et navigation
+
+Cinq onglets : **État · Paiement · Dépenses · Historique · Plus**. Sanctions, Membres, Trésorerie,
+Journal et Règlement sont regroupés dans « Plus » plutôt que tassés dans une barre qui ne tient pas
+sur 360 px. Tout y est consultable sans code.
+
+Deux catégories de plus : `eau_collation` et `entretien`.
+
+> **Point de vigilance.** Cela a imposé de **reconstruire la table `demandes`** : SQLite ne sait pas
+> modifier une contrainte `CHECK`. Seule opération non strictement additive du projet — donc
+> conditionnée à la présence de la contrainte, transactionnelle, avec recopie colonne par colonne et
+> clés étrangères désactivées le temps de l'échange. Vérifiée sur une base au format LOT 3 bis :
+> demandes et décaissements préservés. La liste fermée est désormais tenue par la route, qui refuse
+> en 400 — même garantie, sans migration à chaque ajout futur.
+
+### 4. Exports et documents sans URL visible
+
+L'application télécharge le fichier elle-même (`http` + `path_provider`), l'écrit sous
+`Cotisations_AAAA.pdf` / `.xlsx`, puis l'ouvre (`open_filex`), avec le partage en secours
+(`share_plus`). Plus aucune ouverture du navigateur — ni pour les exports, ni pour le règlement, ni
+pour les justificatifs et fiches santé.
+
+Confier une URL au navigateur posait trois problèmes : l'adresse de l'API s'affichait en clair, les
+URL pré-signées restaient dans son historique, et le fichier atterrissait dans un dossier que
+l'utilisateur ne retrouvait pas.
+
+### 5. Journal d'activité
+
+`GET /api/journal?annee=&limite=` (**public**) reconstitue un seul fil chronologique à partir des
+cotisations tranchées, sanctions, demandes, décaissements, publication du règlement et solde
+d'ouverture — avec l'acteur de chaque décision.
+
+Ce que le journal ne contient **jamais** : fiches santé, clés S3, URL de justificatif. Le fil est
+public, les pièces ne le sont pas. L'application l'expose depuis « Plus », avec une icône par type,
+un filtre et une pagination.
+
+### Vérifications
+
+| Cas | Attendu | Obtenu |
+| --- | --- | --- |
+| `verify` avec le code d'un trésorier | rôle + nom | OK `{"roles":["tresorier"],"membre":"Junior JIDJOU"}` |
+| Junior saisit **sa** cotisation | 403 | OK |
+| Merveille, puis admin, saisissent celle de Junior | 201 | OK / OK |
+| Traçabilité dans le journal | nom visible | OK « Junior JIDJOU par Merveille BADJECK » |
+| Censeur sanctionne un membre protégé | 403 | OK · admin **201** |
+| Solde d'ouverture sans code, puis code trésorier | 401 | OK / OK |
+| Solde d'ouverture 100 000 au 13/09 (admin) | 200 | OK — 15 000 puis **110 000** |
+| Cotisation d'août, antérieure à l'ouverture | exclue | OK |
+| `eau_collation`, `entretien` · catégorie inventée | 201 · 400 | OK |
+| Reconstruction de `demandes` sur base LOT 3 bis | lignes préservées | OK — demandes et décaissements intacts |
+| `Content-Disposition` des exports | `Cotisations_2026` | OK `.pdf` et `.xlsx` |
+| Ligne « Solde d'ouverture au 13/09/2026 » | présente | OK — 100 000 |
+| Journal : fiches santé, clés S3 | aucune | OK |
+
+`node --check` sur les 13 fichiers backend : **OK**. `flutter analyze` : **0 erreur, 0 avertissement**.
+`flutter test` : **14 tests**. APK release arm64 construit en local.
+
+---
+
 ## Point de blocage à traiter : l'instance EC2 n'a pas d'accès S3
 
 Ni clés dans `.env`, ni rôle IAM attaché. En l'état, **les justificatifs de paiement, le règlement
@@ -430,11 +525,12 @@ Le SDK détecte seul le rôle : aucune clé ne doit être écrite dans `.env`.
 
 ## Résumé pour l'architecte
 
-1. **Backend** : six rôles par code (ajout d'`intendant` et `competitions`), codes à **six chiffres** protégés par un plafond de 5 échecs par IP sur 15 minutes (429 ensuite, chaque échec journalisé) ; **demandes de dépense et décaissements** — personne ne décaisse sans demande approuvée, invariant tenu par le code et par une contrainte `UNIQUE` ; reçu de déclaration désormais facultatif en espèces, obligatoire en Mobile Money.
-2. **Trésorerie** : `solde réel = cotisations validées + pénalités encaissées − décaissements`, plus un bloc « engagé » et la répartition des dépenses par catégorie. Exports enrichis d'une feuille et d'une page « Dépenses AAAA » et d'une ligne de solde.
-3. **Flutter** : écran Trésorerie à trois sections (demandes, dépenses, répartition), bouton « Exprimer un besoin », approbation, refus et décaissement par le trésorier, badge des demandes en attente sur le portefeuille. Champ de code en clavier numérique à six chiffres. État et Historique inchangés — cotisations uniquement.
+1. **Séparation des pouvoirs** : les trésoriers ont un code nominatif (`TRESORIERS`), ce qui interdit en 403 de traiter sa propre cotisation, de se désigner bénéficiaire d'un décaissement, et de sanctionner un membre de `CENSEUR_MEMBRES` sans le code admin. Chaque décision porte le nom de son auteur.
+2. **Solde d'ouverture** (admin) : point de départ de la caisse, seuls les mouvements postérieurs s'y ajoutent. Sans lui, comportement inchangé.
+3. **Navigation** : cinq onglets — État, Paiement, Dépenses, Historique, Plus. Journal d'activité public dans « Plus ». Exports et documents téléchargés puis ouverts dans l'application, plus par le navigateur.
 4. **Sur l'instance** : `cd ~/sante-extremes/backend && git pull && npm install && npm run migrate && sudo systemctl restart sde-api`
-5. **Écrire dans le `.env` de l'instance** les six variables, chacune avec un code à six chiffres choisi par vos soins et **jamais écrit dans le dépôt** : `ADMIN_PASSWORD`, `TRESORIER_PASSWORD`, `SECRETAIRE_PASSWORD`, `CENSEUR_PASSWORD`, `INTENDANT_PASSWORD`, `COMPETITIONS_PASSWORD`. Un rôle dont la variable est absente n'est jamais accordé.
-6. **Tester** : `/api/auth/verify` avec chacun des six codes → le rôle attendu ; six codes erronés d'affilée → 429 au sixième ; création d'une demande par le trésorier → 401, par le secrétaire → 201 ; décaisser une demande non approuvée → 409 ; après décaissement, `/api/tresorerie.solde_reel` baisse du montant et `/api/historique` ne bouge pas ; déclarer en espèces sans reçu → 201, en Mobile Money sans reçu → 400.
-7. **Bloquant S3 inchangé** : sans rôle IAM sur l'instance, justificatifs, règlement, fiches santé, déclarations **et pièces de dépense** échouent en 500. Politique minimale et commandes exactes ci-dessus.
-8. **Changer les six codes** avant l'assemblée, et ne jamais les transmettre par un canal qui les conserve.
+5. **`.env` à modifier** : remplacer `TRESORIER_PASSWORD` par `TRESORIERS=Nom Prenom:code,Autre Nom:code` — noms **exactement** comme dans la table `members` — et ajouter `CENSEUR_MEMBRES=Nom Prenom`. Les autres variables sont inchangées ; aucune valeur n'est écrite dans le dépôt.
+6. **Copier `/var/lib/sde/sde.db` avant `npm run migrate`** : cette migration reconstruit la table `demandes` pour lever une contrainte que SQLite ne sait pas modifier. L'opération est transactionnelle et vérifiée, mais c'est la seule du projet qui ne soit pas purement additive.
+7. **Tester** : `/api/auth/verify` avec un code trésorier renvoie son nom ; ce trésorier sur sa propre cotisation → 403, l'autre → 200 ; sanction sur un membre protégé → 403 au censeur, 201 à l'admin ; `PUT /api/tresorerie/solde-ouverture` → 401 sauf admin ; `/api/journal` → 200, sans fiche santé ni clé S3 ; export → `Content-Disposition: Cotisations_2026.pdf`.
+8. **Bloquant S3 inchangé** : sans rôle IAM sur l'instance, justificatifs, règlement, fiches santé, déclarations et pièces de dépense échouent en 500.
+9. **Changer les codes** avant l'assemblée, et ne jamais les transmettre par un canal qui les conserve.
