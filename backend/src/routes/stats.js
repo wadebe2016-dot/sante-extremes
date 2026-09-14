@@ -17,6 +17,7 @@
 
 const express = require('express');
 const { lireToutes } = require('../db');
+const { calculerSoldeReel } = require('./tresorerie');
 
 const routeur = express.Router();
 
@@ -136,6 +137,7 @@ routeur.get('/', async (requete, reponse) => {
       };
     });
 
+    const situation = await calculerSoldeReel();
     const nombreAJour = membres.filter((membre) => membre.paid).length;
     const moisCourant = new Date().toISOString().slice(0, 7); // format AAAA-MM
     const montantEncaisse = membres.reduce((somme, membre) => somme + membre.montant_total, 0);
@@ -147,6 +149,10 @@ routeur.get('/', async (requete, reponse) => {
       percentage_paid: membres.length === 0 ? 0 : Math.round((nombreAJour / membres.length) * 100),
       current_month: moisCourant,
       montant_encaisse: montantEncaisse,
+      // Solde de caisse, calculé par le même code que /api/tresorerie : l'écran
+      // État l'affiche sans avoir à lancer un second appel.
+      solde_reel: situation.solde,
+      solde_ouverture: situation.ouverture,
       en_attente: membres.filter((membre) => membre.statut_mois === 'en_attente').length,
       penalites_dues: membres.reduce((somme, membre) => somme + membre.penalite_due, 0),
       suspensions_actives: membres.filter((membre) => membre.suspendu).length,
@@ -154,7 +160,8 @@ routeur.get('/', async (requete, reponse) => {
 
     console.log(
       `[stats] tableau public servi : ${synthese.paid}/${synthese.total_members} à jour ` +
-        `(${synthese.percentage_paid} %) pour ${moisCourant}, ${montantEncaisse} XAF encaissés`
+        `(${synthese.percentage_paid} %) pour ${moisCourant}, ${montantEncaisse} XAF encaissés, ` +
+        `${situation.solde} XAF en caisse`
     );
     return reponse.status(200).json({ summary: synthese, members: membres });
   } catch (erreur) {

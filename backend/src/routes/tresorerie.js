@@ -52,6 +52,57 @@ async function lireSoldeOuverture() {
   }
 }
 
+/**
+ * Calcule le solde reel de la caisse et sa composition.
+ *
+ * Extrait de la route pour etre reutilise par GET /api/stats : l'ecran Etat
+ * affiche ce meme chiffre, et deux calculs paralleles finiraient par diverger
+ * au premier changement de regle.
+ *
+ *   solde = ouverture
+ *         + cotisations validees et penalites encaissees depuis la date d'ouverture
+ *         - decaissements depuis cette date
+ *
+ * Sans solde d'ouverture, tout l'historique est compte.
+ *
+ * @returns {Promise<object>} solde, ouverture et detail des composantes
+ */
+async function calculerSoldeReel() {
+  const ouverture = await lireSoldeOuverture();
+  const depuis = ouverture ? ouverture.date : null;
+
+  const cotisations = await lireUne(
+    `SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre
+       FROM cotisations
+      WHERE statut = 'validee'
+        ${depuis ? 'AND date_paiement >= ?' : ''}`,
+    depuis ? [depuis] : []
+  );
+
+  const penalites = await lireUne(
+    `SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre
+       FROM sanctions
+      WHERE type = 'penalite' AND statut = 'reglee'
+        ${depuis ? 'AND date_reglement >= ?' : ''}`,
+    depuis ? [depuis] : []
+  );
+
+  const decaissements = await lireUne(
+    `SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre
+       FROM decaissements
+      ${depuis ? 'WHERE date_paiement >= ?' : ''}`,
+    depuis ? [depuis] : []
+  );
+
+  const solde =
+    (ouverture ? ouverture.montant : 0) +
+    nombre(cotisations.somme) +
+    nombre(penalites.somme) -
+    nombre(decaissements.somme);
+
+  return { solde, ouverture, cotisations, penalites, decaissements };
+}
+
 /** Somme d'une requête agrégée, ramenée à un nombre sûr. */
 function nombre(valeur) {
   const converti = Number(valeur);
@@ -114,25 +165,11 @@ routeur.get('/', async (requete, reponse) => {
     // LOT 3 ter — le solde d'ouverture fixe le point de départ : seuls les
     // mouvements postérieurs s'y ajoutent. Sans lui, on additionne tout
     // l'historique, exactement comme avant.
-    const ouverture = await lireSoldeOuverture();
+    const situation = await calculerSoldeReel();
+    const ouverture = situation.ouverture;
     const depuis = ouverture ? ouverture.date : null;
-
-    // --- Encaissements effectifs, depuis l'ouverture ----------------------
-    const cotisationsTotal = await lireUne(
-      `SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre
-         FROM cotisations
-        WHERE statut = 'validee'
-          ${depuis ? 'AND date_paiement >= ?' : ''}`,
-      depuis ? [depuis] : []
-    );
-
-    const penalitesTotal = await lireUne(
-      `SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre
-         FROM sanctions
-        WHERE type = 'penalite' AND statut = 'reglee'
-          ${depuis ? 'AND date_reglement >= ?' : ''}`,
-      depuis ? [depuis] : []
-    );
+    const cotisationsTotal = situation.cotisations;
+    const penalitesTotal = situation.penalites;
 
     // --- Encaissements de l'année demandée --------------------------------
     const cotisationsAnnee = await lireUne(
@@ -151,12 +188,7 @@ routeur.get('/', async (requete, reponse) => {
     );
 
     // --- Sorties de caisse ------------------------------------------------
-    const decaissementsTotal = await lireUne(
-      `SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre
-         FROM decaissements
-        ${depuis ? 'WHERE date_paiement >= ?' : ''}`,
-      depuis ? [depuis] : []
-    );
+    const decaissementsTotal = situation.decaissements;
 
     const decaissementsAnnee = await lireUne(
       `SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre
@@ -283,11 +315,7 @@ routeur.get('/', async (requete, reponse) => {
         LIMIT 20`
     );
 
-    const soldeReel =
-      (ouverture ? ouverture.montant : 0) +
-      nombre(cotisationsTotal.somme) +
-      nombre(penalitesTotal.somme) -
-      nombre(decaissementsTotal.somme);
+    const soldeReel = situation.solde;
 
     const attendu = nombre(penalitesDues.somme) + nombre(declarationsEnAttente.somme);
 
@@ -379,3 +407,4 @@ routeur.get('/', async (requete, reponse) => {
 });
 
 module.exports = routeur;
+module.exports.calculerSoldeReel = calculerSoldeReel;
