@@ -93,6 +93,20 @@ const COLONNES_AJOUTEES = {
     { nom: 'motif_refus', definition: 'TEXT' },
     { nom: 'date_validation', definition: 'TEXT' },
     { nom: 'cle_s3', definition: 'TEXT' },
+    // LOT 3 ter — qui a validé, refusé ou saisi cette cotisation
+    { nom: 'valide_par', definition: 'TEXT' },
+  ],
+  sanctions: [
+    // LOT 3 ter — qui a encaissé la pénalité
+    { nom: 'encaisse_par', definition: 'TEXT' },
+  ],
+  demandes: [
+    // LOT 3 ter — qui a approuvé ou refusé la demande
+    { nom: 'approuve_par', definition: 'TEXT' },
+  ],
+  decaissements: [
+    // LOT 3 ter — qui a sorti l'argent de la caisse
+    { nom: 'decaisse_par', definition: 'TEXT' },
   ],
 };
 
@@ -134,6 +148,66 @@ async function completerColonnes() {
   }
 }
 
+/**
+ * Libère « demandes.categorie » de sa contrainte CHECK sur une base existante.
+ *
+ * SQLite ne sait pas modifier un CHECK : ajouter « eau_collation » et
+ * « entretien » à la liste fermée impose de reconstruire la table. C'est la
+ * seule opération non strictement additive de tout le projet, d'où les
+ * précautions :
+ *   - elle ne s'exécute QUE si la contrainte est encore présente ;
+ *   - toutes les lignes sont recopiées, colonne par colonne, dans une
+ *     transaction ;
+ *   - les clés étrangères sont désactivées le temps de l'échange, sans quoi la
+ *     suppression de « demandes » buterait sur « decaissements ».
+ *
+ * La liste fermée n'est pas perdue : elle est tenue par src/routes/demandes.js,
+ * qui refuse en 400 toute catégorie inconnue.
+ */
+async function libererCategorieDemandes() {
+  const table = await lireUne("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'demandes'");
+  if (!table || !table.sql) return; // table absente : schema.sql la créera sans CHECK
+  if (!/CHECK\s*\(\s*categorie\s+IN/i.test(table.sql)) return; // déjà libérée
+
+  console.log('[migration] reconstruction de « demandes » pour libérer la catégorie');
+
+  const colonnes = (await colonnesDe('demandes')).join(', ');
+
+  await executerScript('PRAGMA foreign_keys = OFF');
+  try {
+    await executerScript('BEGIN IMMEDIATE');
+    await executerScript(`
+      CREATE TABLE demandes_nouveau (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        categorie            TEXT NOT NULL,
+        libelle              TEXT NOT NULL,
+        montant_estime       REAL NOT NULL CHECK (montant_estime > 0),
+        urgence              TEXT NOT NULL DEFAULT 'normale' CHECK (urgence IN ('normale', 'urgente')),
+        justificatif_cle_s3  TEXT,
+        role_demandeur       TEXT NOT NULL
+                               CHECK (role_demandeur IN ('intendant', 'secretaire', 'competitions', 'admin')),
+        statut               TEXT NOT NULL DEFAULT 'en_attente'
+                               CHECK (statut IN ('en_attente', 'approuvee', 'refusee', 'payee')),
+        motif_refus          TEXT,
+        approuve_par         TEXT,
+        date_demande         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        date_decision        TEXT
+      )
+    `);
+    await executerScript(`INSERT INTO demandes_nouveau (${colonnes}) SELECT ${colonnes} FROM demandes`);
+    await executerScript('DROP TABLE demandes');
+    await executerScript('ALTER TABLE demandes_nouveau RENAME TO demandes');
+    await executerScript('COMMIT');
+    console.log('[migration] « demandes » reconstruite, lignes préservées');
+  } catch (erreur) {
+    await executerScript('ROLLBACK').catch(() => {});
+    console.error(`[migration] reconstruction de « demandes » impossible : ${erreur.message}`);
+    throw erreur;
+  } finally {
+    await executerScript('PRAGMA foreign_keys = ON');
+  }
+}
+
 /** Exécute un script SQL multi-instructions. */
 function executerScript(sql) {
   return new Promise((resoudre, rejeter) => {
@@ -163,6 +237,7 @@ async function migrer() {
 
   try {
     await completerColonnes();
+    await libererCategorieDemandes();
     await executerScript(schema);
   } catch (erreur) {
     console.error(`[migration] échec de l'application du schéma : ${erreur.message}`);

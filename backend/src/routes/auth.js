@@ -13,7 +13,7 @@
 'use strict';
 
 const express = require('express');
-const { rolesDuCode } = require('../middleware/auth');
+const { identifierCode } = require('../middleware/auth');
 const limiteur = require('../middleware/limiteur');
 
 const routeur = express.Router();
@@ -32,7 +32,7 @@ routeur.post('/verify', (requete, reponse) => {
     return reponse.status(400).json({ error: 'Le code est obligatoire' });
   }
 
-  const roles = rolesDuCode(code);
+  const { roles, membre } = identifierCode(code);
 
   if (roles.length === 0) {
     limiteur.enregistrerEchec(source, 'vérification de code');
@@ -40,8 +40,13 @@ routeur.post('/verify', (requete, reponse) => {
   }
 
   limiteur.reinitialiser(source);
-  console.log(`[auth] code validé pour les rôles : ${roles.join(', ')}`);
-  return reponse.status(200).json({ roles });
+  console.log(
+    `[auth] code validé pour les rôles : ${roles.join(', ')}${membre ? ` — ${membre}` : ''}`
+  );
+
+  // Le nom permet à l'application d'afficher « Trésorier · Junior » et de
+  // griser sa propre cotisation dans la file de validation.
+  return reponse.status(200).json({ roles, membre: membre || null });
 });
 
 module.exports = routeur;

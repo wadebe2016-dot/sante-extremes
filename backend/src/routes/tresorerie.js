@@ -17,16 +17,89 @@
 'use strict';
 
 const express = require('express');
-const { lireUne, lireToutes } = require('../db');
+const { executer, lireUne, lireToutes } = require('../db');
+const { exigerRole } = require('../middleware/auth');
 const { lireAnnee, MOIS } = require('./historique');
 
 const routeur = express.Router();
+
+const CLE_OUVERTURE = 'solde_ouverture';
+
+/**
+ * Lit le solde d'ouverture, ou null s'il n'a jamais été défini.
+ *
+ * Tant qu'il est absent, la trésorerie se calcule sur l'intégralité de
+ * l'historique — c'est le comportement d'avant, conservé tel quel.
+ *
+ * @returns {Promise<{montant: number, date: string, commentaire: string|null}|null>}
+ */
+async function lireSoldeOuverture() {
+  const ligne = await lireUne('SELECT valeur, date_maj FROM parametres WHERE cle = ?', [CLE_OUVERTURE]);
+  if (!ligne || !ligne.valeur) return null;
+
+  try {
+    const valeur = JSON.parse(ligne.valeur);
+    if (!Number.isFinite(Number(valeur.montant)) || !valeur.date) return null;
+    return {
+      montant: Number(valeur.montant),
+      date: String(valeur.date),
+      commentaire: valeur.commentaire || null,
+      date_maj: ligne.date_maj,
+    };
+  } catch (erreur) {
+    console.warn(`[tresorerie] solde d'ouverture illisible : ${erreur.message}`);
+    return null;
+  }
+}
 
 /** Somme d'une requête agrégée, ramenée à un nombre sûr. */
 function nombre(valeur) {
   const converti = Number(valeur);
   return Number.isFinite(converti) ? converti : 0;
 }
+
+/**
+ * PUT /api/tresorerie/solde-ouverture — fixer le point de départ (admin).
+ *
+ * Réservé à l'administration : ce montant déplace le solde affiché à toute
+ * l'association, il n'a rien à faire entre les mains d'un seul trésorier.
+ */
+routeur.put('/solde-ouverture', exigerRole('admin'), async (requete, reponse) => {
+  const montant = Number.parseFloat(requete.body?.montant);
+  const date = String(requete.body?.date || '').trim();
+  const commentaire =
+    typeof requete.body?.commentaire === 'string' ? requete.body.commentaire.trim() : '';
+
+  if (!Number.isFinite(montant) || montant < 0) {
+    return reponse.status(400).json({ error: 'Le montant doit être un nombre positif ou nul' });
+  }
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return reponse.status(400).json({ error: 'Date invalide (format attendu : AAAA-MM-JJ)' });
+  }
+
+  try {
+    const valeur = JSON.stringify({
+      montant,
+      date,
+      commentaire: commentaire ? commentaire.slice(0, 300) : null,
+    });
+
+    await executer(
+      `INSERT INTO parametres (cle, valeur, date_maj)
+       VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+       ON CONFLICT (cle) DO UPDATE
+         SET valeur = excluded.valeur, date_maj = excluded.date_maj`,
+      [CLE_OUVERTURE, valeur]
+    );
+
+    console.log(`[tresorerie] solde d'ouverture fixé : ${montant} XAF au ${date}`);
+    return reponse.status(200).json(await lireSoldeOuverture());
+  } catch (erreur) {
+    console.error(`[tresorerie] enregistrement du solde d'ouverture : ${erreur.message}`);
+    return reponse.status(500).json({ error: 'Impossible d’enregistrer le solde d’ouverture' });
+  }
+});
 
 /** GET /api/tresorerie — situation de caisse, globale et sur l'année demandée */
 routeur.get('/', async (requete, reponse) => {
@@ -38,15 +111,27 @@ routeur.get('/', async (requete, reponse) => {
   const anneeTexte = String(annee);
 
   try {
-    // --- Encaissements effectifs, depuis toujours -------------------------
+    // LOT 3 ter — le solde d'ouverture fixe le point de départ : seuls les
+    // mouvements postérieurs s'y ajoutent. Sans lui, on additionne tout
+    // l'historique, exactement comme avant.
+    const ouverture = await lireSoldeOuverture();
+    const depuis = ouverture ? ouverture.date : null;
+
+    // --- Encaissements effectifs, depuis l'ouverture ----------------------
     const cotisationsTotal = await lireUne(
-      "SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre FROM cotisations WHERE statut = 'validee'"
+      `SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre
+         FROM cotisations
+        WHERE statut = 'validee'
+          ${depuis ? 'AND date_paiement >= ?' : ''}`,
+      depuis ? [depuis] : []
     );
 
     const penalitesTotal = await lireUne(
       `SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre
          FROM sanctions
-        WHERE type = 'penalite' AND statut = 'reglee'`
+        WHERE type = 'penalite' AND statut = 'reglee'
+          ${depuis ? 'AND date_reglement >= ?' : ''}`,
+      depuis ? [depuis] : []
     );
 
     // --- Encaissements de l'année demandée --------------------------------
@@ -67,7 +152,10 @@ routeur.get('/', async (requete, reponse) => {
 
     // --- Sorties de caisse ------------------------------------------------
     const decaissementsTotal = await lireUne(
-      'SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre FROM decaissements'
+      `SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre
+         FROM decaissements
+        ${depuis ? 'WHERE date_paiement >= ?' : ''}`,
+      depuis ? [depuis] : []
     );
 
     const decaissementsAnnee = await lireUne(
@@ -196,6 +284,7 @@ routeur.get('/', async (requete, reponse) => {
     );
 
     const soldeReel =
+      (ouverture ? ouverture.montant : 0) +
       nombre(cotisationsTotal.somme) +
       nombre(penalitesTotal.somme) -
       nombre(decaissementsTotal.somme);
@@ -208,6 +297,9 @@ routeur.get('/', async (requete, reponse) => {
 
       // Ce que l'association détient, tous exercices confondus.
       solde_reel: soldeReel,
+
+      // Point de départ du calcul, null tant qu'il n'a pas été défini.
+      solde_ouverture: ouverture,
 
       encaisse: {
         cotisations: nombre(cotisationsTotal.somme),
@@ -273,7 +365,8 @@ routeur.get('/', async (requete, reponse) => {
 
     console.log(
       `[tresorerie] situation servie : solde ${soldeReel} XAF ` +
-        `(${charge.encaisse.cotisations} cotisations + ${charge.encaisse.penalites} pénalités ` +
+        `(${ouverture ? `ouverture ${ouverture.montant} au ${ouverture.date} + ` : ''}` +
+        `${charge.encaisse.cotisations} cotisations + ${charge.encaisse.penalites} pénalités ` +
         `− ${charge.depense.total} dépenses), ${attendu} XAF attendus, ` +
         `${charge.engage.total} XAF engagés`
     );

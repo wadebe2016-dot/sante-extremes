@@ -96,27 +96,61 @@ function lireDepenses(annee) {
  * Le document doit porter le même chiffre que l'écran Trésorerie, sans quoi
  * l'assemblée aurait deux vérités à concilier.
  */
+/** Solde d'ouverture eventuel, pour le rappeler en tete de la ligne de solde. */
+async function lireOuverture() {
+  const ligne = await lireUne("SELECT valeur FROM parametres WHERE cle = 'solde_ouverture'");
+  if (!ligne || !ligne.valeur) return null;
+  try {
+    const valeur = JSON.parse(ligne.valeur);
+    return Number.isFinite(Number(valeur.montant)) && valeur.date
+      ? { montant: Number(valeur.montant), date: String(valeur.date) }
+      : null;
+  } catch (erreur) {
+    return null;
+  }
+}
+
 async function calculerSolde() {
+  // Meme regle que GET /api/tresorerie : depuis le solde d'ouverture s'il existe.
+  const ouverture = await lireOuverture();
+  const depuis = ouverture ? ouverture.date : null;
+
   const cotisations = await lireUne(
-    "SELECT COALESCE(SUM(montant), 0) AS somme FROM cotisations WHERE statut = 'validee'"
+    `SELECT COALESCE(SUM(montant), 0) AS somme FROM cotisations
+      WHERE statut = 'validee' ${depuis ? 'AND date_paiement >= ?' : ''}`,
+    depuis ? [depuis] : []
   );
   const penalites = await lireUne(
     `SELECT COALESCE(SUM(montant), 0) AS somme FROM sanctions
-      WHERE type = 'penalite' AND statut = 'reglee'`
+      WHERE type = 'penalite' AND statut = 'reglee' ${depuis ? 'AND date_reglement >= ?' : ''}`,
+    depuis ? [depuis] : []
   );
-  const depenses = await lireUne('SELECT COALESCE(SUM(montant), 0) AS somme FROM decaissements');
+  const depenses = await lireUne(
+    `SELECT COALESCE(SUM(montant), 0) AS somme FROM decaissements
+      ${depuis ? 'WHERE date_paiement >= ?' : ''}`,
+    depuis ? [depuis] : []
+  );
+
+  const entrees = (Number(cotisations.somme) || 0) + (Number(penalites.somme) || 0);
+  const sorties = Number(depenses.somme) || 0;
 
   return {
+    ouverture,
     cotisations: Number(cotisations.somme) || 0,
     penalites: Number(penalites.somme) || 0,
-    depenses: Number(depenses.somme) || 0,
-    solde: (Number(cotisations.somme) || 0) + (Number(penalites.somme) || 0) - (Number(depenses.somme) || 0),
+    depenses: sorties,
+    solde: (ouverture ? ouverture.montant : 0) + entrees - sorties,
   };
 }
 
-/** Nom de fichier proposé au téléchargement. */
+/**
+ * Nom de fichier propose au telechargement.
+ *
+ * L'application enregistre le fichier sous ce nom : il doit rester court et
+ * reconnaissable dans une liste de telechargements.
+ */
 function nomFichier(extension, annee) {
-  return `sante-des-extremes-cotisations-${annee}.${extension}`;
+  return `Cotisations_${annee}.${extension}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +224,7 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
       { header: 'Montant', key: 'montant', width: 14 },
       { header: 'Statut', key: 'statut', width: 12 },
       { header: 'Date règlement', key: 'reglement', width: 16 },
+      { header: 'Encaissé par', key: 'encaisse_par', width: 22 },
     ];
 
     const enTetePenalites = feuillePenalites.getRow(1);
@@ -210,6 +245,7 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
         sanction.montant === null ? '' : Number(sanction.montant),
         LIBELLE_STATUT[sanction.statut] || sanction.statut,
         formaterDate(sanction.date_reglement),
+        sanction.encaisse_par || '',
       ]);
     }
 
@@ -231,6 +267,7 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
       { header: 'Montant', key: 'montant', width: 14 },
       { header: 'Bénéficiaire', key: 'beneficiaire', width: 24 },
       { header: 'Payé par', key: 'paye_par', width: 20 },
+      { header: 'Décaissé par', key: 'decaisse_par', width: 22 },
     ];
 
     const enTeteDepenses = feuilleDepenses.getRow(1);
@@ -248,6 +285,7 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
         Number(depense.montant),
         depense.beneficiaire || '',
         LIBELLE_PAYE_PAR[depense.paye_par] || depense.paye_par,
+        depense.decaisse_par || '',
       ]);
     }
 
@@ -256,7 +294,7 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
     }
 
     const totalDepenses = depenses.reduce((somme, ligne) => somme + Number(ligne.montant), 0);
-    const ligneTotalDepenses = feuilleDepenses.addRow(['TOTAL', '', '', totalDepenses, '', '']);
+    const ligneTotalDepenses = feuilleDepenses.addRow(['TOTAL', '', '', totalDepenses, '', '', '']);
     ligneTotalDepenses.font = { bold: true };
     ligneTotalDepenses.eachCell((cellule) => {
       cellule.border = { top: { style: 'thin', color: { argb: 'FF1C1B1A' } } };
@@ -268,6 +306,19 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
     // Ligne de solde, en fin de document : le même chiffre que l'écran Trésorerie.
     const situation = await calculerSolde();
     feuilleDepenses.addRow([]);
+
+    if (situation.ouverture) {
+      const ligneOuverture = feuilleDepenses.addRow([
+        `Solde d'ouverture au ${formaterDate(situation.ouverture.date)}`,
+        '',
+        '',
+        situation.ouverture.montant,
+        '',
+        '',
+      ]);
+      ligneOuverture.font = { italic: true };
+    }
+
     const ligneSolde = feuilleDepenses.addRow([
       'SOLDE DE CAISSE',
       `cotisations ${formaterMontant(situation.cotisations)} + pénalités ${formaterMontant(situation.penalites)} − dépenses ${formaterMontant(situation.depenses)}`,
@@ -577,7 +628,11 @@ routeur.get('/historique.pdf', async (requete, reponse) => {
       .fontSize(8)
       .fillColor('#888780')
       .text(
-        `cotisations validées ${formaterMontant(situation.cotisations)} ` +
+        (situation.ouverture
+          ? `solde d'ouverture au ${formaterDate(situation.ouverture.date)} ` +
+            `${formaterMontant(situation.ouverture.montant)} + `
+          : '') +
+          `cotisations validées ${formaterMontant(situation.cotisations)} ` +
           `+ pénalités encaissées ${formaterMontant(situation.penalites)} ` +
           `− dépenses ${formaterMontant(situation.depenses)}`,
         document.page.margins.left,

@@ -92,9 +92,10 @@ routeur.post(
             SET statut = 'reglee',
                 date_reglement = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
                 moyen_reglement = ?,
+                encaisse_par = ?,
                 fichier_s3_url = ?
           WHERE id = ?`,
-        [moyen, urlJustificatif, identifiant]
+        [moyen, requete.agent, urlJustificatif, identifiant]
       );
 
       const ligne = await lireUne(
@@ -119,6 +120,7 @@ routeur.post(
         date_sanction: ligne.date_sanction,
         date_reglement: ligne.date_reglement,
         moyen_reglement: ligne.moyen_reglement,
+        encaisse_par: ligne.encaisse_par || null,
         fichier_s3_url: ligne.fichier_s3_url || null,
       });
     } catch (erreur) {

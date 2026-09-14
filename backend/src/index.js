@@ -19,6 +19,7 @@ const routesDemandes = require('./routes/demandes');
 const routesDocuments = require('./routes/documents');
 const routesExport = require('./routes/export');
 const routesHistorique = require('./routes/historique');
+const routesJournal = require('./routes/journal');
 const routesPenalites = require('./routes/penalites');
 const routesSanctions = require('./routes/sanctions');
 const routesStats = require('./routes/stats');
@@ -63,6 +64,7 @@ application.get('/api/health', (requete, reponse) => {
 // Routes publiques : consultation et exports, aucun code requis
 application.use('/api/stats', routesStats);
 application.use('/api/historique', routesHistorique);
+application.use('/api/journal', routesJournal);
 application.use('/api/tresorerie', routesTresorerie);
 application.use('/api/decaissements', routesDecaissements); // lecture publique, justificatif restreint
 application.use('/api/export', routesExport);

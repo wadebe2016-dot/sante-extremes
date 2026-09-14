@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS cotisations (
                     CHECK (statut IN ('validee', 'en_attente', 'refusee')),
   motif_refus     TEXT,
   date_validation TEXT,
+  valide_par      TEXT,   -- trésorier ayant validé, refusé ou saisi (LOT 3 ter)
   date_paiement   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
   FOREIGN KEY (member_id) REFERENCES members (id) ON DELETE CASCADE
 );
@@ -70,6 +71,7 @@ CREATE TABLE IF NOT EXISTS sanctions (
   date_sanction   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
   date_reglement  TEXT,
   moyen_reglement TEXT,
+  encaisse_par    TEXT,   -- trésorier ayant encaissé la pénalité (LOT 3 ter)
   fichier_s3_url  TEXT,
   FOREIGN KEY (member_id) REFERENCES members (id) ON DELETE CASCADE
 );
@@ -119,12 +121,14 @@ CREATE INDEX IF NOT EXISTS idx_documents_member ON documents (member_id);
 --   en_attente → supprimée           (le demandeur se ravise, tant que rien
 --                                     n'a été décidé)
 -- ---------------------------------------------------------------------------
+-- La catégorie n'est PAS contrainte au niveau du schéma (LOT 3 ter).
+-- Elle l'était, et ajouter « eau_collation » et « entretien » aurait imposé de
+-- reconstruire la table en production — SQLite ne sait pas modifier un CHECK.
+-- La liste fermée est désormais tenue par src/routes/demandes.js, qui refuse en
+-- 400 toute valeur inconnue : même garantie, sans migration à chaque ajout.
 CREATE TABLE IF NOT EXISTS demandes (
   id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-  categorie            TEXT NOT NULL
-                         CHECK (categorie IN ('equipement', 'location_stade', 'kine_medical',
-                                              'transport', 'arbitrage', 'competition_evenement',
-                                              'autre')),
+  categorie            TEXT NOT NULL,
   libelle              TEXT NOT NULL,
   montant_estime       REAL NOT NULL CHECK (montant_estime > 0),
   urgence              TEXT NOT NULL DEFAULT 'normale' CHECK (urgence IN ('normale', 'urgente')),
@@ -134,6 +138,7 @@ CREATE TABLE IF NOT EXISTS demandes (
   statut               TEXT NOT NULL DEFAULT 'en_attente'
                          CHECK (statut IN ('en_attente', 'approuvee', 'refusee', 'payee')),
   motif_refus          TEXT,
+  approuve_par         TEXT,   -- trésorier ayant tranché (LOT 3 ter)
   date_demande         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
   date_decision        TEXT
 );
@@ -154,9 +159,22 @@ CREATE TABLE IF NOT EXISTS decaissements (
   moyen               TEXT NOT NULL CHECK (moyen IN ('Mobile Money', 'Espèce')),
   paye_par            TEXT NOT NULL CHECK (paye_par IN ('caisse', 'avance_rembourse')),
   beneficiaire        TEXT,
+  decaisse_par        TEXT,   -- trésorier ayant sorti l'argent (LOT 3 ter)
   justificatif_cle_s3 TEXT,
   commentaire         TEXT,
   FOREIGN KEY (demande_id) REFERENCES demandes (id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_decaissements_date ON decaissements (date_paiement);
+
+-- ---------------------------------------------------------------------------
+-- LOT 3 ter — Paramètres de l'association
+--
+-- Table clé/valeur volontairement générique : le solde d'ouverture de la
+-- trésorerie y vit aujourd'hui, d'autres réglages y viendront sans migration.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS parametres (
+  cle      TEXT PRIMARY KEY,
+  valeur   TEXT,
+  date_maj TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);

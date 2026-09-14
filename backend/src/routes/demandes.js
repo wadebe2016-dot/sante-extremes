@@ -20,7 +20,7 @@
 
 const express = require('express');
 const { executer, lireUne, lireToutes } = require('../db');
-const { exigerRole } = require('../middleware/auth');
+const { exigerRole, memeMembre } = require('../middleware/auth');
 const {
   recevoirRecu,
   televerserFichierPrive,
@@ -37,6 +37,8 @@ const CATEGORIES = Object.freeze({
   transport: 'Transport',
   arbitrage: 'Arbitrage',
   competition_evenement: 'Compétition et évènement',
+  eau_collation: 'Eau et collation',
+  entretien: 'Entretien',
   autre: 'Autre',
 });
 
@@ -72,6 +74,7 @@ function formaterDemande(ligne) {
     role_demandeur: ligne.role_demandeur,
     statut: ligne.statut,
     motif_refus: ligne.motif_refus || null,
+    approuve_par: ligne.approuve_par || null,
     date_demande: ligne.date_demande,
     date_decision: ligne.date_decision || null,
     a_un_devis: Boolean(ligne.justificatif_cle_s3),
@@ -83,6 +86,7 @@ function formaterDemande(ligne) {
           moyen: ligne.decaissement_moyen,
           paye_par: ligne.decaissement_paye_par,
           beneficiaire: ligne.decaissement_beneficiaire || null,
+          decaisse_par: ligne.decaissement_decaisse_par || null,
           commentaire: ligne.decaissement_commentaire || null,
           a_un_justificatif: Boolean(ligne.decaissement_cle),
         }
@@ -99,6 +103,7 @@ const SELECTION = `
          x.moyen         AS decaissement_moyen,
          x.paye_par      AS decaissement_paye_par,
          x.beneficiaire  AS decaissement_beneficiaire,
+         x.decaisse_par  AS decaissement_decaisse_par,
          x.commentaire   AS decaissement_commentaire,
          x.justificatif_cle_s3 AS decaissement_cle
     FROM demandes d
@@ -276,9 +281,10 @@ routeur.post('/:id/approuver', exigerRole('tresorier'), async (requete, reponse)
     await executer(
       `UPDATE demandes
           SET statut = 'approuvee', motif_refus = NULL,
+              approuve_par = ?,
               date_decision = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
         WHERE id = ?`,
-      [demande.id]
+      [requete.agent, demande.id]
     );
 
     const ligne = await lireUne(`${SELECTION} WHERE d.id = ?`, [demande.id]);
@@ -313,9 +319,10 @@ routeur.post('/:id/refuser', exigerRole('tresorier'), async (requete, reponse) =
     await executer(
       `UPDATE demandes
           SET statut = 'refusee', motif_refus = ?,
+              approuve_par = ?,
               date_decision = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
         WHERE id = ?`,
-      [motif.slice(0, 200), demande.id]
+      [motif.slice(0, 200), requete.agent, demande.id]
     );
 
     const ligne = await lireUne(`${SELECTION} WHERE d.id = ?`, [demande.id]);
@@ -402,6 +409,15 @@ routeur.post(
         .json({ error: 'Précisez le bénéficiaire de l’avance à rembourser' });
     }
 
+    // Séparation des pouvoirs : celui qui sort l'argent ne peut pas être le
+    // bénéficiaire. L'autre trésorier, ou l'admin, s'en charge.
+    if (requete.tresorier && memeMembre(beneficiaire, requete.tresorier)) {
+      console.warn(`[decaissements] refus : ${requete.tresorier} se désigne bénéficiaire`);
+      return reponse.status(403).json({
+        error: 'Un trésorier ne peut pas décaisser à son propre bénéfice',
+      });
+    }
+
     try {
       const demande = await chargerDemande(Number.parseInt(requete.params.id, 10), reponse);
       if (!demande) return undefined;
@@ -423,14 +439,15 @@ routeur.post(
 
       const resultat = await executer(
         `INSERT INTO decaissements
-           (demande_id, montant, moyen, paye_par, beneficiaire, justificatif_cle_s3, commentaire)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           (demande_id, montant, moyen, paye_par, beneficiaire, decaisse_par, justificatif_cle_s3, commentaire)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           demande.id,
           montant,
           moyen,
           payePar,
           beneficiaire || null,
+          requete.agent,
           cleJustificatif,
           commentaire || null,
         ]

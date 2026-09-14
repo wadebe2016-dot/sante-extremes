@@ -12,7 +12,7 @@
 
 const express = require('express');
 const { executer, lireUne, lireToutes } = require('../db');
-const { exigerRole } = require('../middleware/auth');
+const { exigerRole, memeMembre } = require('../middleware/auth');
 const {
   recevoirJustificatif,
   recevoirRecu,
@@ -120,6 +120,15 @@ routeur.post(
         return reponse.status(404).json({ error: 'Membre introuvable' });
       }
 
+      // Séparation des pouvoirs (LOT 3 ter) : un trésorier ne constate pas son
+      // propre versement. L'autre trésorier, ou l'admin, le fait.
+      if (requete.tresorier && memeMembre(membre.name, requete.tresorier)) {
+        console.warn(`[cotisations] refus : ${requete.tresorier} saisit sa propre cotisation`);
+        return reponse.status(403).json({
+          error: 'Un trésorier ne peut pas traiter sa propre cotisation',
+        });
+      }
+
       // Le justificatif est facultatif : un paiement en espèce peut être saisi sans photo
       let urlJustificatif = null;
       if (requete.file) {
@@ -131,18 +140,18 @@ routeur.post(
       // Saisie par le trésorier : la cotisation est validée d'emblée.
       const resultat = datePaiement
         ? await executer(
-            `INSERT INTO cotisations (member_id, montant, moyen, fichier_s3_url, date_paiement, statut, date_validation)
-             VALUES (?, ?, ?, ?, ?, 'validee', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))`,
-            [idMembre, montant, moyen, urlJustificatif, datePaiement]
+            `INSERT INTO cotisations (member_id, montant, moyen, fichier_s3_url, date_paiement, statut, date_validation, valide_par)
+             VALUES (?, ?, ?, ?, ?, 'validee', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?)`,
+            [idMembre, montant, moyen, urlJustificatif, datePaiement, requete.agent]
           )
         : await executer(
-            `INSERT INTO cotisations (member_id, montant, moyen, fichier_s3_url, statut, date_validation)
-             VALUES (?, ?, ?, ?, 'validee', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))`,
-            [idMembre, montant, moyen, urlJustificatif]
+            `INSERT INTO cotisations (member_id, montant, moyen, fichier_s3_url, statut, date_validation, valide_par)
+             VALUES (?, ?, ?, ?, 'validee', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?)`,
+            [idMembre, montant, moyen, urlJustificatif, requete.agent]
           );
 
       const cotisation = await lireUne(
-        'SELECT id, member_id, montant, moyen, fichier_s3_url, date_paiement FROM cotisations WHERE id = ?',
+        'SELECT id, member_id, montant, moyen, fichier_s3_url, date_paiement, valide_par FROM cotisations WHERE id = ?',
         [resultat.id]
       );
 
@@ -396,13 +405,21 @@ routeur.post('/:id/valider', exigerRole('tresorier'), async (requete, reponse) =
       return reponse.status(409).json({ error: 'Cette cotisation est déjà validée' });
     }
 
+    if (requete.tresorier && memeMembre(cotisation.member_name, requete.tresorier)) {
+      console.warn(`[declaration] refus : ${requete.tresorier} valide sa propre cotisation`);
+      return reponse.status(403).json({
+        error: 'Un trésorier ne peut pas traiter sa propre cotisation',
+      });
+    }
+
     await executer(
       `UPDATE cotisations
           SET statut = 'validee',
               motif_refus = NULL,
+              valide_par = ?,
               date_validation = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
         WHERE id = ?`,
-      [identifiant]
+      [requete.agent, identifiant]
     );
 
     console.log(
@@ -415,6 +432,7 @@ routeur.post('/:id/valider', exigerRole('tresorier'), async (requete, reponse) =
       member_name: cotisation.member_name,
       montant: Number(cotisation.montant),
       statut: 'validee',
+      valide_par: requete.agent,
     });
   } catch (erreur) {
     console.error(`[declaration] validation #${identifiant} : ${erreur.message}`);
@@ -452,9 +470,18 @@ routeur.post('/:id/refuser', exigerRole('tresorier'), async (requete, reponse) =
       return reponse.status(409).json({ error: 'Cette déclaration est déjà refusée' });
     }
 
+    if (requete.tresorier && memeMembre(cotisation.member_name, requete.tresorier)) {
+      console.warn(`[declaration] refus : ${requete.tresorier} refuse sa propre cotisation`);
+      return reponse.status(403).json({
+        error: 'Un trésorier ne peut pas traiter sa propre cotisation',
+      });
+    }
+
     await executer(
-      "UPDATE cotisations SET statut = 'refusee', motif_refus = ?, date_validation = NULL WHERE id = ?",
-      [motif.slice(0, 200), identifiant]
+      `UPDATE cotisations
+          SET statut = 'refusee', motif_refus = ?, valide_par = ?, date_validation = NULL
+        WHERE id = ?`,
+      [motif.slice(0, 200), requete.agent, identifiant]
     );
 
     console.log(`[declaration] refusée : #${identifiant} — ${cotisation.member_name} — ${motif}`);
@@ -465,6 +492,7 @@ routeur.post('/:id/refuser', exigerRole('tresorier'), async (requete, reponse) =
       member_name: cotisation.member_name,
       statut: 'refusee',
       motif_refus: motif,
+      valide_par: requete.agent,
     });
   } catch (erreur) {
     console.error(`[declaration] refus #${identifiant} : ${erreur.message}`);

@@ -15,7 +15,7 @@
 
 const express = require('express');
 const { executer, lireUne, lireToutes } = require('../db');
-const { exigerRole } = require('../middleware/auth');
+const { exigerRole, estMembreProtege } = require('../middleware/auth');
 
 const routeur = express.Router();
 
@@ -81,6 +81,7 @@ function formaterSanction(ligne) {
     date_sanction: ligne.date_sanction,
     date_reglement: ligne.date_reglement || null,
     moyen_reglement: ligne.moyen_reglement || null,
+    encaisse_par: ligne.encaisse_par || null,
     fichier_s3_url: ligne.fichier_s3_url || null,
     suspension_active: suspensionActive(ligne),
   };
@@ -243,6 +244,15 @@ routeur.post('/', exigerRole('censeur'), async (requete, reponse) => {
       return reponse.status(404).json({ error: 'Membre introuvable' });
     }
 
+    // LOT 3 ter : sanctionner un censeur ne peut pas relever du censeur.
+    // CENSEUR_MEMBRES liste ces membres ; seul l'admin les sanctionne.
+    if (estMembreProtege(membre.name) && !(requete.roles || []).includes('admin')) {
+      console.warn(`[sanctions] refus : ${membre.name} est protégé, code admin requis`);
+      return reponse.status(403).json({
+        error: 'Ce membre ne peut être sanctionné qu’avec le code administrateur',
+      });
+    }
+
     const resultat = await executer(
       'INSERT INTO sanctions (member_id, type, motif, montant, date_fin) VALUES (?, ?, ?, ?, ?)',
       [idMembre, type, motif, montant, dateFin]
@@ -280,6 +290,13 @@ routeur.post('/:id/lever', exigerRole('censeur'), async (requete, reponse) => {
 
     if (sanction.type !== 'suspension') {
       return reponse.status(400).json({ error: 'Seule une suspension peut être levée' });
+    }
+
+    const membreLeve = await lireUne('SELECT name FROM members WHERE id = ?', [sanction.member_id]);
+    if (estMembreProtege(membreLeve?.name) && !(requete.roles || []).includes('admin')) {
+      return reponse.status(403).json({
+        error: 'Ce membre ne peut être sanctionné qu’avec le code administrateur',
+      });
     }
 
     if (sanction.statut !== 'due') {
@@ -321,6 +338,13 @@ routeur.delete('/:id', exigerRole('censeur'), async (requete, reponse) => {
     const sanction = await lireUne('SELECT * FROM sanctions WHERE id = ?', [identifiant]);
     if (!sanction) {
       return reponse.status(404).json({ error: 'Sanction introuvable' });
+    }
+
+    const membreAnnule = await lireUne('SELECT name FROM members WHERE id = ?', [sanction.member_id]);
+    if (estMembreProtege(membreAnnule?.name) && !(requete.roles || []).includes('admin')) {
+      return reponse.status(403).json({
+        error: 'Ce membre ne peut être sanctionné qu’avec le code administrateur',
+      });
     }
 
     if (sanction.statut === 'annulee') {
