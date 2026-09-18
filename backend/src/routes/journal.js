@@ -8,7 +8,8 @@
  *
  * C'est une vue de REDEVABILITÉ : elle dit qui a fait quoi, et quand. D'où la
  * colonne « acteur », alimentée par les colonnes de traçabilité posées au
- * LOT 3 ter (valide_par, encaisse_par, approuve_par, decaisse_par).
+ * LOT 3 ter (valide_par, encaisse_par, approuve_par, decaisse_par) et par
+ * parametres.definit_par pour le solde d'ouverture.
  *
  * Ce que le journal ne contient JAMAIS :
  *   - les fiches santé, ni leur existence — ce sont des données de santé ;
@@ -213,7 +214,9 @@ routeur.get('/', async (requete, reponse) => {
 
     // Le solde d'ouverture ne vit pas dans une table d'événements : on l'ajoute
     // à sa place chronologique s'il tombe dans l'année demandée.
-    const ouverture = await lireUne("SELECT valeur, date_maj FROM parametres WHERE cle = 'solde_ouverture'");
+    const ouverture = await lireUne(
+      "SELECT valeur, definit_par, date_maj FROM parametres WHERE cle = 'solde_ouverture'"
+    );
     if (ouverture && ouverture.valeur) {
       try {
         const valeur = JSON.parse(ouverture.valeur);
@@ -225,7 +228,10 @@ routeur.get('/', async (requete, reponse) => {
             sujet: valeur.commentaire || 'Point de départ de la trésorerie',
             montant: Number(valeur.montant),
             detail: null,
-            acteur: LIBELLE_ROLE.admin,
+            // Le solde d'ouverture est ouvert aux trésoriers : l'acteur est le
+            // nom de celui qui l'a fixé. Les soldes posés avant cette ouverture
+            // n'ont pas de nom enregistré — ils venaient forcément de l'admin.
+            acteur: acteurLisible(ouverture.definit_par) || LIBELLE_ROLE.admin,
           });
           evenements.sort((a, b) => String(b.date).localeCompare(String(a.date)));
         }

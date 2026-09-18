@@ -31,10 +31,13 @@ const CLE_OUVERTURE = 'solde_ouverture';
  * Tant qu'il est absent, la trésorerie se calcule sur l'intégralité de
  * l'historique — c'est le comportement d'avant, conservé tel quel.
  *
- * @returns {Promise<{montant: number, date: string, commentaire: string|null}|null>}
+ * @returns {Promise<{montant: number, date: string, commentaire: string|null,
+ *                    definit_par: string|null, date_maj: string}|null>}
  */
 async function lireSoldeOuverture() {
-  const ligne = await lireUne('SELECT valeur, date_maj FROM parametres WHERE cle = ?', [CLE_OUVERTURE]);
+  const ligne = await lireUne('SELECT valeur, definit_par, date_maj FROM parametres WHERE cle = ?', [
+    CLE_OUVERTURE,
+  ]);
   if (!ligne || !ligne.valeur) return null;
 
   try {
@@ -44,6 +47,9 @@ async function lireSoldeOuverture() {
       montant: Number(valeur.montant),
       date: String(valeur.date),
       commentaire: valeur.commentaire || null,
+      // Null sur un solde posé avant l'ouverture aux trésoriers : l'application
+      // n'affiche alors pas de nom plutôt que d'en inventer un.
+      definit_par: ligne.definit_par || null,
       date_maj: ligne.date_maj,
     };
   } catch (erreur) {
@@ -110,12 +116,18 @@ function nombre(valeur) {
 }
 
 /**
- * PUT /api/tresorerie/solde-ouverture — fixer le point de départ (admin).
+ * PUT /api/tresorerie/solde-ouverture — fixer le point de départ (trésorier).
  *
- * Réservé à l'administration : ce montant déplace le solde affiché à toute
- * l'association, il n'a rien à faire entre les mains d'un seul trésorier.
+ * Ouvert aux trésoriers, l'admin conservant l'accès : la reprise de caisse est
+ * un geste de trésorerie, et l'exiger de l'administration bloquait l'opération
+ * la plus courante derrière la personne la moins disponible.
+ *
+ * Le contrepoids n'est pas le verrou mais la trace : le nom de qui a fixé le
+ * montant est enregistré dans « parametres.definit_par », renvoyé par les deux
+ * routes de lecture et inscrit au journal. Un solde d'ouverture déplace le
+ * solde affiché à toute l'association ; il ne doit jamais être anonyme.
  */
-routeur.put('/solde-ouverture', exigerRole('admin'), async (requete, reponse) => {
+routeur.put('/solde-ouverture', exigerRole('tresorier'), async (requete, reponse) => {
   const montant = Number.parseFloat(requete.body?.montant);
   const date = String(requete.body?.date || '').trim();
   const commentaire =
@@ -136,15 +148,20 @@ routeur.put('/solde-ouverture', exigerRole('admin'), async (requete, reponse) =>
       commentaire: commentaire ? commentaire.slice(0, 300) : null,
     });
 
+    // requete.agent : nom du trésorier nominatif, sinon « admin » ou le rôle.
+    const acteur = requete.agent || 'admin';
+
     await executer(
-      `INSERT INTO parametres (cle, valeur, date_maj)
-       VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+      `INSERT INTO parametres (cle, valeur, definit_par, date_maj)
+       VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
        ON CONFLICT (cle) DO UPDATE
-         SET valeur = excluded.valeur, date_maj = excluded.date_maj`,
-      [CLE_OUVERTURE, valeur]
+         SET valeur = excluded.valeur,
+             definit_par = excluded.definit_par,
+             date_maj = excluded.date_maj`,
+      [CLE_OUVERTURE, valeur, acteur]
     );
 
-    console.log(`[tresorerie] solde d'ouverture fixé : ${montant} XAF au ${date}`);
+    console.log(`[tresorerie] solde d'ouverture fixé par ${acteur} : ${montant} XAF au ${date}`);
     return reponse.status(200).json(await lireSoldeOuverture());
   } catch (erreur) {
     console.error(`[tresorerie] enregistrement du solde d'ouverture : ${erreur.message}`);

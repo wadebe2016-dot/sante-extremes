@@ -108,6 +108,10 @@ const COLONNES_AJOUTEES = {
     // LOT 3 ter — qui a sorti l'argent de la caisse
     { nom: 'decaisse_par', definition: 'TEXT' },
   ],
+  parametres: [
+    // Solde d'ouverture ouvert aux trésoriers — qui a fixé ce réglage.
+    { nom: 'definit_par', definition: 'TEXT' },
+  ],
 };
 
 /** Liste les colonnes existantes d'une table. */

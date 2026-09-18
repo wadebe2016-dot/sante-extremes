@@ -172,9 +172,14 @@ CREATE INDEX IF NOT EXISTS idx_decaissements_date ON decaissements (date_paiemen
 --
 -- Table clé/valeur volontairement générique : le solde d'ouverture de la
 -- trésorerie y vit aujourd'hui, d'autres réglages y viendront sans migration.
+--
+-- « definit_par » complète « date_maj » : depuis que les trésoriers peuvent
+-- fixer le solde d'ouverture, savoir QUAND un réglage a changé ne suffit plus,
+-- il faut savoir QUI l'a changé.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS parametres (
-  cle      TEXT PRIMARY KEY,
-  valeur   TEXT,
-  date_maj TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+  cle         TEXT PRIMARY KEY,
+  valeur      TEXT,
+  definit_par TEXT,
+  date_maj    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );

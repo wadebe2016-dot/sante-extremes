@@ -410,14 +410,18 @@ refuserait en 403, autant le dire avant le geste.
 
 ### 2. Solde d'ouverture
 
-Table `parametres`, `PUT /api/tresorerie/solde-ouverture` (**admin**). Le solde ne compte alors que
+Table `parametres`, `PUT /api/tresorerie/solde-ouverture`. Le solde ne compte alors que
 les mouvements **à partir de cette date** :
 
     solde réel = ouverture + cotisations et pénalités depuis la date − décaissements depuis la date
 
 Sans solde défini, tout l'historique est additionné : le comportement d'avant est conservé tel quel.
 L'écran Trésorerie affiche la ligne et son bouton « Définir », avec confirmation — ce montant déplace
-le solde vu par toute l'association, d'où le code admin.
+le solde vu par toute l'association.
+
+> La route était **réservée à l'admin** au LOT 3 ter ; elle est ouverte aux **trésoriers** depuis, avec
+> enregistrement de l'auteur. Voir « Évolution — le solde d'ouverture passe aux trésoriers » en fin de
+> document.
 
 ### 3. Onglet Dépenses et navigation
 
@@ -464,7 +468,7 @@ un filtre et une pagination.
 | Merveille, puis admin, saisissent celle de Junior | 201 | OK / OK |
 | Traçabilité dans le journal | nom visible | OK « Junior JIDJOU par Merveille BADJECK » |
 | Censeur sanctionne un membre protégé | 403 | OK · admin **201** |
-| Solde d'ouverture sans code, puis code trésorier | 401 | OK / OK |
+| Solde d'ouverture sans code, puis code trésorier | 401 | OK / OK — *règle changée depuis, voir la fin du document* |
 | Solde d'ouverture 100 000 au 13/09 (admin) | 200 | OK — 15 000 puis **110 000** |
 | Cotisation d'août, antérieure à l'ouverture | exclue | OK |
 | `eau_collation`, `entretien` · catégorie inventée | 201 · 400 | OK |
@@ -554,12 +558,81 @@ Le SDK détecte seul le rôle : aucune clé ne doit être écrite dans `.env`.
 ## Résumé pour l'architecte
 
 1. **Séparation des pouvoirs** : les trésoriers ont un code nominatif (`TRESORIERS`), ce qui interdit en 403 de traiter sa propre cotisation, de se désigner bénéficiaire d'un décaissement, et de sanctionner un membre de `CENSEUR_MEMBRES` sans le code admin. Chaque décision porte le nom de son auteur.
-2. **Solde d'ouverture** (admin) : point de départ de la caisse, seuls les mouvements postérieurs s'y ajoutent. Sans lui, comportement inchangé.
+2. **Solde d'ouverture** (trésorier ou admin) : point de départ de la caisse, seuls les mouvements postérieurs s'y ajoutent. Sans lui, comportement inchangé. Le nom de qui l'a fixé est enregistré, affiché et journalisé.
 3. **Navigation** : cinq onglets — État, Paiement, Dépenses, Historique, Plus. Journal d'activité public dans « Plus ». Exports et documents téléchargés puis ouverts dans l'application, plus par le navigateur.
 4. **Sur l'instance** : `cd ~/sante-extremes/backend && git pull && npm install && npm run migrate && sudo systemctl restart sde-api`
 5. **`.env` à modifier** : remplacer `TRESORIER_PASSWORD` par `TRESORIERS=Nom Prenom:code,Autre Nom:code` — noms **exactement** comme dans la table `members` — et ajouter `CENSEUR_MEMBRES=Nom Prenom`. Les autres variables sont inchangées ; aucune valeur n'est écrite dans le dépôt.
 6. **Copier `/var/lib/sde/sde.db` avant `npm run migrate`** : cette migration reconstruit la table `demandes` pour lever une contrainte que SQLite ne sait pas modifier. L'opération est transactionnelle et vérifiée, mais c'est la seule du projet qui ne soit pas purement additive.
-7. **Tester** : `/api/auth/verify` avec un code trésorier renvoie son nom ; ce trésorier sur sa propre cotisation → 403, l'autre → 200 ; sanction sur un membre protégé → 403 au censeur, 201 à l'admin ; `PUT /api/tresorerie/solde-ouverture` → 401 sauf admin ; `/api/journal` → 200, sans fiche santé ni clé S3 ; export → `Content-Disposition: Cotisations_2026.pdf`.
+7. **Tester** : `/api/auth/verify` avec un code trésorier renvoie son nom ; ce trésorier sur sa propre cotisation → 403, l'autre → 200 ; sanction sur un membre protégé → 403 au censeur, 201 à l'admin ; `PUT /api/tresorerie/solde-ouverture` → 401 sans code, 200 avec un code trésorier ou admin ; `/api/journal` → 200, sans fiche santé ni clé S3 ; export → `Content-Disposition: Cotisations_2026.pdf`.
 8. **Bloquant S3 inchangé** : sans rôle IAM sur l'instance, justificatifs, règlement, fiches santé, déclarations et pièces de dépense échouent en 500.
 9. **Changer les codes** avant l'assemblée, et ne jamais les transmettre par un canal qui les conserve.
 10. **403 sur un reçu corrigé côté application** : l'URL pré-signée est désormais demandée au moment d'ouvrir le justificatif, plus au chargement de la liste. Rien à déployer sur l'instance.
+11. **Solde d'ouverture ouvert aux trésoriers**, avec le nom de l'auteur enregistré et journalisé. Une colonne ajoutée sur `parametres` : `npm run migrate` suffit, l'opération est purement additive.
+
+---
+
+## Évolution — le solde d'ouverture passe aux trésoriers
+
+Fixer le solde d'ouverture est une reprise de caisse : un geste de trésorerie, pas une décision
+administrative. L'exiger de l'administration plaçait l'opération la plus courante derrière la
+personne la moins disponible — l'association attendait l'admin pour repartir d'un chiffre juste.
+
+Le verrou est donc levé, mais pas le contrôle : il change de nature. Ce n'est plus « qui a le droit »
+mais **« qui l'a fait »**.
+
+### Backend
+
+| Point | Avant | Après |
+| --- | --- | --- |
+| `PUT /api/tresorerie/solde-ouverture` | `exigerRole('admin')` | `exigerRole('tresorier')` — l'admin passe toujours |
+| Auteur | non conservé | colonne `parametres.definit_par` |
+| `GET /api/tresorerie` · `GET /api/stats` | `solde_ouverture` sans auteur | `solde_ouverture.definit_par` et `.date_maj` |
+| `GET /api/journal` | événement attribué à « Administration » | attribué au **nom du trésorier** qui l'a fixé |
+
+`definit_par` reçoit `requete.agent` : le nom du trésorier nominatif, ou `admin` quand
+l'administration tranche elle-même. C'est la même mécanique que `valide_par`, `encaisse_par` et
+`decaisse_par` — un solde d'ouverture déplace le solde vu par toute l'association, il ne doit jamais
+être anonyme.
+
+**Migration purement additive** : `definit_par` est déclarée dans `COLONNES_AJOUTEES` de `db.js` et
+posée par `ALTER TABLE ADD COLUMN` sur une base existante. Un solde fixé avant ce changement reste
+lisible, simplement sans auteur — le journal le range alors sous « Administration », qui est la seule
+origine qu'il pouvait avoir, et l'application n'affiche aucun nom plutôt que d'en supposer un.
+
+### Application
+
+- Le bouton de l'écran Trésorerie demande le **code trésorier** (l'admin est accepté partout). Il
+  reste visible pour tous : l'application ne connaît le rôle qu'une fois le code saisi, et masquer
+  l'action ne ferait que la rendre introuvable au trésorier qui vient d'ouvrir l'application.
+- Le libellé devient « **Redéfinir** » quand un solde existe déjà.
+- Sous le montant : « **défini par Junior Mbarga le 18 septembre 2026** ».
+- Un avertissement accompagne tout solde existant, sur la carte **et** en tête du formulaire :
+  « Redéfinir le solde recalcule la caisse à partir de cette date. »
+- Le formulaire **pré-remplit** montant, date et commentaire actuels — on corrige, on ne resaisit pas.
+  La confirmation avant envoi est conservée.
+
+### Vérifications
+
+Serveur local, `TRESORIERS="Junior Mbarga:222222"`, `ADMIN_PASSWORD=111111`, `CENSEUR_PASSWORD=333333`.
+
+| Cas | Attendu | Obtenu |
+| --- | --- | --- |
+| `PUT /solde-ouverture` **sans** code | 401 | OK — `{"error":"Code requis"}` |
+| `PUT` avec le code **trésorier** | 200 | OK — `"definit_par":"Junior Mbarga"` |
+| `PUT` avec le code **admin** | 200 | OK — `"definit_par":"admin"` |
+| `PUT` avec un code **censeur** | 401 | OK — `{"error":"Code invalide ou droits insuffisants"}` |
+| `GET /api/tresorerie` | `definit_par` exposé | OK — et `solde_reel` = 150 000 |
+| `GET /api/stats` | `definit_par` exposé | OK — dans `summary.solde_ouverture` |
+| Journal, après le `PUT` trésorier | acteur nommé | OK — « Solde d'ouverture défini · **Junior Mbarga** · 150 000 » |
+| Journal, après le `PUT` admin | acteur admin | OK — « Administration » |
+| Base **sans** `definit_par` (format d'avant) | colonne ajoutée, solde lisible | OK — `[migration] colonne ajoutée : parametres.definit_par`, `definit_par: null`, journal « Administration » |
+
+`flutter analyze` : **0 erreur, 0 avertissement**. APK release arm64 construit en local.
+
+### À faire sur l'instance
+
+```bash
+cd ~/sante-extremes/backend && git pull && npm run migrate && sudo systemctl restart sde-api
+```
+
+Aucune variable d'environnement à changer : les trésoriers utilisent le code qu'ils ont déjà.
