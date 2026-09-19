@@ -24,8 +24,14 @@ CREATE TABLE IF NOT EXISTS members (
 -- du mois, l'historique annuel et les exports.
 --
 -- Les colonnes ajoutées après coup (statut, motif_refus, date_validation,
--- cle_s3) sont posées par src/db.js sur les bases existantes : un
--- CREATE TABLE IF NOT EXISTS n'ajoute rien à une table déjà présente.
+-- cle_s3, date_versement) sont posées par src/db.js sur les bases existantes :
+-- un CREATE TABLE IF NOT EXISTS n'ajoute rien à une table déjà présente.
+--
+-- TROIS DATES, TROIS USAGES — ne pas les confondre :
+--   date_paiement   mois dû (le 5 du mois concerné) : répartition mensuelle,
+--                   statut payé/impayé, historique annuel, exports ;
+--   date_versement  jour de remise de l'argent : trésorerie UNIQUEMENT ;
+--   date_validation contrôle du trésorier : traçabilité et journal.
 CREATE TABLE IF NOT EXISTS cotisations (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   member_id       INTEGER NOT NULL,
@@ -38,6 +44,7 @@ CREATE TABLE IF NOT EXISTS cotisations (
   motif_refus     TEXT,
   date_validation TEXT,
   valide_par      TEXT,   -- trésorier ayant validé, refusé ou saisi (LOT 3 ter)
+  date_versement  DATETIME, -- jour où l'argent a été remis (entrée en caisse)
   date_paiement   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
   FOREIGN KEY (member_id) REFERENCES members (id) ON DELETE CASCADE
 );

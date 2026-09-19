@@ -175,14 +175,41 @@ Les codes font **six chiffres**. Le serveur bloque une IP après **cinq échecs 
 Sert à l'application pour savoir quels onglets déverrouiller, sans exécuter d'action.
 
 **`POST /api/cotisations`** — `multipart/form-data` : `member_id` (entier), `montant` (nombre > 0),
-`moyen` (`Mobile Money` ou `Espèce`, accents et casse tolérés), `mois` (`AAAA-MM`, **facultatif** —
-rattrapage, un mois futur est refusé), `fichier` (image, 5 Mo max, **facultatif**).
+`moyen` (`Mobile Money` ou `Espèce`, accents et casse tolérés), `date_versement` (`AAAA-MM-JJ`,
+**obligatoire**), `mois` (`AAAA-MM`, **facultatif** — rattrapage, un mois futur est refusé),
+`fichier` (image, 5 Mo max, **facultatif**).
 
 **`POST /api/cotisations/declarer`** — déclaration par le membre, **publique**. `multipart/form-data` :
-`member_id`, `mois` (`AAAA-MM`), `montant`, `moyen`, `fichier` (image ou PDF, 5 Mo) — **obligatoire
-en Mobile Money, facultatif en espèces** : un transfert laisse une trace, une remise de billets non.
+`member_id`, `mois` (`AAAA-MM`), `date_versement` (`AAAA-MM-JJ`, **obligatoire**), `montant`, `moyen`,
+`fichier` (image ou PDF, 5 Mo) — **obligatoire en Mobile Money, facultatif en espèces** : un transfert
+laisse une trace, une remise de billets non.
 La cotisation naît `en_attente` et ne compte nulle part avant validation par le trésorier.
 Plafond de 10 déclarations par IP et par heure ; 409 si le mois est déjà réglé ou déjà déclaré.
+
+#### Trois dates, trois usages
+
+Une cotisation porte trois dates, qui ne répondent pas à la même question. Les confondre faisait
+disparaître de l'argent du solde de caisse.
+
+| Colonne | Ce qu'elle dit | Ce qu'elle décide |
+| --- | --- | --- |
+| `date_paiement` | **mois dû** — le 5 du mois concerné, par convention du champ `mois` | répartition mensuelle : statut payé/impayé de `/api/stats`, `/api/historique`, tableaux des exports |
+| `date_versement` | **entrée en caisse** — le jour où l'argent a été remis | trésorerie, et elle seule : `solde_reel` de `/api/tresorerie` et `/api/stats` |
+| `date_validation` | **contrôle du trésorier** — posée à la validation | traçabilité et `/api/journal` |
+
+`date_versement` est **obligatoire** à la saisie comme à la déclaration : absente ou vide → `400`
+« La date du versement est obligatoire ». Une date à venir est refusée, ainsi qu'une date antérieure
+de plus de **12 mois** — au-delà, c'est une faute de frappe bien plus souvent qu'un versement oublié.
+Elle est enregistrée à midi UTC, pour que la journée reste la même sous tous les fuseaux.
+
+Les routes exposent en plus un booléen **`regularisation`**, vrai lorsque le mois dû précède le mois
+du versement — l'argent a été remis après le mois qu'il couvre. Le journal le met en mots :
+« Cotisation de mai versée le 18 sept », contre « Cotisation de septembre » dans le cas courant.
+
+Sur une base existante, la colonne est posée par `ALTER TABLE ADD COLUMN` (migration purement
+additive) et remplie **une seule fois** avec `COALESCE(date_validation, date_paiement)`. Les lignes
+qui n'ont jamais eu de date de versement continuent donc d'être comptées, par repli en cascade :
+`COALESCE(date_versement, date_validation, date_paiement)`.
 
 **`GET /api/tresorerie?annee=`** — situation de caisse, **publique** :
 `solde_reel = cotisations validées + pénalités encaissées − décaissements`, sa composition, le bloc
@@ -227,8 +254,14 @@ date du dernier règlement, même s'il est plus ancien. Le tableau repart donc �
 
 ```sql
 members      (id, name UNIQUE, created_at)
-cotisations  (id, member_id → members.id ON DELETE CASCADE, montant, moyen, fichier_s3_url, date_paiement)
+cotisations  (id, member_id → members.id ON DELETE CASCADE, montant, moyen, fichier_s3_url,
+              statut, motif_refus, valide_par,
+              date_paiement,    -- mois dû
+              date_versement,   -- entrée en caisse
+              date_validation)  -- contrôle du trésorier
 ```
+
+Tests du backend : `npm test` (runner `node --test`, base SQLite temporaire, aucun accès réseau).
 
 ---
 

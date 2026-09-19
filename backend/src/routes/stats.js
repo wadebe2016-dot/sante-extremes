@@ -12,12 +12,17 @@
  * champs viennent de la table « sanctions » et n'influencent NI le statut
  * payé/impayé, NI les montants de cotisation : les deux comptabilités restent
  * séparées.
+ *
+ * Le statut du mois se lit sur `date_paiement`, le MOIS DÛ — inchangé. La date de
+ * remise de l'argent (`date_versement`) n'est ici qu'un détail d'affichage de la
+ * sous-ligne : elle ne décide que de la trésorerie.
  */
 'use strict';
 
 const express = require('express');
 const { lireToutes } = require('../db');
 const { calculerSoldeReel } = require('./tresorerie');
+const { estRegularisation } = require('./cotisations');
 
 const routeur = express.Router();
 
@@ -49,7 +54,7 @@ routeur.get('/', async (requete, reponse) => {
     // Détail du dernier versement de chaque membre, pour la sous-ligne de
     // l'écran État (« 3 sept · 10 000 · Mobile Money »).
     const derniers = await lireToutes(`
-      SELECT c.member_id, c.montant, c.moyen, c.date_paiement
+      SELECT c.member_id, c.montant, c.moyen, c.date_paiement, c.date_versement
         FROM cotisations c
         JOIN (
           SELECT member_id, MAX(date_paiement) AS date_max
@@ -131,6 +136,13 @@ routeur.get('/', async (requete, reponse) => {
         montant_total: Number(ligne.montant_mois) || 0,
         dernier_montant: dernier ? Number(dernier.montant) || 0 : null,
         dernier_moyen: dernier ? dernier.moyen : null,
+        // Jour de remise du dernier versement, et régularisation le cas échéant :
+        // l'écran État affiche « Septembre · versé le 12 sept ». Le statut du
+        // mois, lui, ne bouge pas d'un iota — il reste assis sur le mois dû.
+        dernier_versement: dernier ? dernier.date_versement || null : null,
+        dernier_regularisation: dernier
+          ? estRegularisation(dernier.date_paiement, dernier.date_versement)
+          : false,
         penalite_due: sanction ? Number(sanction.penalite_due) || 0 : 0,
         suspendu: sanction ? sanction.suspendu === 1 : false,
         date_fin_suspension: sanction ? sanction.date_fin_suspension || null : null,

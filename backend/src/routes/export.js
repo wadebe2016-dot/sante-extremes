@@ -5,8 +5,12 @@
  *   GET /api/export/historique.pdf?annee=2026    (public)
  *
  * Les deux fichiers reprennent exactement les chiffres de GET /api/historique
- * (même fonction de construction), complétés d'un second onglet — ou d'une
- * seconde page — consacré aux pénalités et suspensions.
+ * (même fonction de construction), complétés des pénalités et suspensions, des
+ * dépenses et du solde de caisse.
+ *
+ * Le tableau des cotisations range les montants sur le MOIS DÛ — il ne change
+ * pas. Le classeur Excel porte en plus une feuille « Versements » : la même
+ * population, vue par date de remise de l'argent, régularisations signalées.
  *
  * Les fiches santé n'apparaissent dans aucun export : ce sont des données de
  * santé, elles ne sortent jamais de l'écran du secrétariat.
@@ -20,9 +24,11 @@ const express = require('express');
 const ExcelJS = require('exceljs');
 const PDFDocument = require('pdfkit');
 
-const { lireToutes, lireUne } = require('../db');
+const { lireToutes } = require('../db');
 const { construireHistorique, lireAnnee, MOIS } = require('./historique');
 const { CATEGORIES } = require('./demandes');
+const { calculerSoldeReel } = require('./tresorerie');
+const { estRegularisation } = require('./cotisations');
 
 const routeur = express.Router();
 
@@ -73,6 +79,43 @@ function lireSanctions(annee) {
   );
 }
 
+/**
+ * Cotisations validées de l'année, avec leur date de versement.
+ *
+ * MÊME POPULATION que le tableau croisé : les lignes dont le MOIS DÛ tombe dans
+ * l'année. Le total de la feuille doit pouvoir être rapproché de celui du
+ * tableau, ligne par ligne — d'où l'ordre par date de remise, qui met les
+ * régularisations en évidence.
+ *
+ * @param {number} annee année civile
+ */
+function lireVersements(annee) {
+  return lireToutes(
+    `SELECT c.id, m.name AS member_name, c.date_paiement, c.date_versement,
+            c.date_validation, c.montant, c.moyen, c.valide_par
+       FROM cotisations c
+       JOIN members m ON m.id = c.member_id
+      WHERE c.statut = 'validee'
+        AND strftime('%Y', c.date_paiement) = ?
+      ORDER BY COALESCE(c.date_versement, c.date_validation, c.date_paiement) ASC,
+               m.name COLLATE NOCASE ASC`,
+    [String(annee)]
+  );
+}
+
+/** Mois dû en clair : « sept 2026 ». */
+function formaterMoisDu(valeur) {
+  const texte = String(valeur || '');
+  const numero = Number(texte.slice(5, 7));
+  if (numero < 1 || numero > 12) return texte.slice(0, 7);
+  return `${MOIS[numero - 1]} ${texte.slice(0, 4)}`;
+}
+
+/** Date de remise réellement connue d'une cotisation, ou sa validation à défaut. */
+function versementDe(cotisation) {
+  return cotisation.date_versement || cotisation.date_validation || null;
+}
+
 const LIBELLE_PAYE_PAR = Object.freeze({
   caisse: 'Caisse',
   avance_rembourse: 'Avance remboursée',
@@ -94,52 +137,26 @@ function lireDepenses(annee) {
  * Solde de caisse à la date d'édition, tous exercices confondus.
  *
  * Le document doit porter le même chiffre que l'écran Trésorerie, sans quoi
- * l'assemblée aurait deux vérités à concilier.
+ * l'assemblée aurait deux vérités à concilier. D'où l'appel au calcul de
+ * tresorerie.js plutôt qu'une seconde version des mêmes requêtes : la première
+ * avait déjà divergé, en retenant les cotisations sur leur mois dû au lieu de
+ * leur date de validation.
+ *
+ * Les TABLEAUX de cotisations de l'export, eux, restent rangés par
+ * « date_paiement » : ils affichent le mois dû, qui ne bouge pas.
+ *
+ * @returns {Promise<{ouverture: object|null, cotisations: number,
+ *                    penalites: number, depenses: number, solde: number}>}
  */
-/** Solde d'ouverture eventuel, pour le rappeler en tete de la ligne de solde. */
-async function lireOuverture() {
-  const ligne = await lireUne("SELECT valeur FROM parametres WHERE cle = 'solde_ouverture'");
-  if (!ligne || !ligne.valeur) return null;
-  try {
-    const valeur = JSON.parse(ligne.valeur);
-    return Number.isFinite(Number(valeur.montant)) && valeur.date
-      ? { montant: Number(valeur.montant), date: String(valeur.date) }
-      : null;
-  } catch (erreur) {
-    return null;
-  }
-}
-
 async function calculerSolde() {
-  // Meme regle que GET /api/tresorerie : depuis le solde d'ouverture s'il existe.
-  const ouverture = await lireOuverture();
-  const depuis = ouverture ? ouverture.date : null;
-
-  const cotisations = await lireUne(
-    `SELECT COALESCE(SUM(montant), 0) AS somme FROM cotisations
-      WHERE statut = 'validee' ${depuis ? 'AND date_paiement >= ?' : ''}`,
-    depuis ? [depuis] : []
-  );
-  const penalites = await lireUne(
-    `SELECT COALESCE(SUM(montant), 0) AS somme FROM sanctions
-      WHERE type = 'penalite' AND statut = 'reglee' ${depuis ? 'AND date_reglement >= ?' : ''}`,
-    depuis ? [depuis] : []
-  );
-  const depenses = await lireUne(
-    `SELECT COALESCE(SUM(montant), 0) AS somme FROM decaissements
-      ${depuis ? 'WHERE date_paiement >= ?' : ''}`,
-    depuis ? [depuis] : []
-  );
-
-  const entrees = (Number(cotisations.somme) || 0) + (Number(penalites.somme) || 0);
-  const sorties = Number(depenses.somme) || 0;
+  const situation = await calculerSoldeReel();
 
   return {
-    ouverture,
-    cotisations: Number(cotisations.somme) || 0,
-    penalites: Number(penalites.somme) || 0,
-    depenses: sorties,
-    solde: (ouverture ? ouverture.montant : 0) + entrees - sorties,
+    ouverture: situation.ouverture,
+    cotisations: Number(situation.cotisations.somme) || 0,
+    penalites: Number(situation.penalites.somme) || 0,
+    depenses: Number(situation.decaissements.somme) || 0,
+    solde: situation.solde,
   };
 }
 
@@ -157,7 +174,7 @@ function nomFichier(extension, annee) {
 // Export Excel
 // ---------------------------------------------------------------------------
 
-/** GET /api/export/historique.xlsx — classeur à deux feuilles. */
+/** GET /api/export/historique.xlsx — cotisations, versements, pénalités, dépenses. */
 routeur.get('/historique.xlsx', async (requete, reponse) => {
   const lecture = lireAnnee(requete.query.annee);
   if (lecture.erreur) {
@@ -213,7 +230,67 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
 
     feuille.views = [{ state: 'frozen', xSplit: 1, ySplit: 1 }];
 
-    // --- Feuille 2 : pénalités ---------------------------------------------
+    // --- Feuille 2 : versements --------------------------------------------
+    //
+    // Le tableau croisé range les montants sur leur MOIS DÛ ; il ne dit donc pas
+    // quand l'argent est entré en caisse. Cette feuille le dit, ligne par ligne,
+    // et signale les régularisations — un versement postérieur au mois couvert.
+    const versements = await lireVersements(annee);
+    const feuilleVersements = classeur.addWorksheet(`Versements ${annee}`);
+
+    feuilleVersements.columns = [
+      { header: 'Membre', key: 'membre', width: 28 },
+      { header: 'Mois dû', key: 'mois_du', width: 14 },
+      { header: 'Date de versement', key: 'versement', width: 18 },
+      { header: 'Montant', key: 'montant', width: 14 },
+      { header: 'Moyen', key: 'moyen', width: 16 },
+      { header: 'Régularisation', key: 'regularisation', width: 16 },
+      { header: 'Validé par', key: 'valide_par', width: 22 },
+    ];
+
+    const enTeteVersements = feuilleVersements.getRow(1);
+    enTeteVersements.font = { bold: true };
+    enTeteVersements.eachCell((cellule) => {
+      cellule.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE6E3DD' } };
+      cellule.border = { bottom: { style: 'thin', color: { argb: 'FF888780' } } };
+    });
+
+    for (const versement of versements) {
+      const remise = versementDe(versement);
+      feuilleVersements.addRow([
+        versement.member_name,
+        formaterMoisDu(versement.date_paiement),
+        formaterDate(remise),
+        Number(versement.montant),
+        versement.moyen,
+        estRegularisation(versement.date_paiement, remise) ? 'Oui' : '',
+        versement.valide_par || '',
+      ]);
+    }
+
+    if (versements.length === 0) {
+      feuilleVersements.addRow(['Aucune cotisation validée sur la période']);
+    }
+
+    const totalVersements = versements.reduce((somme, ligne) => somme + Number(ligne.montant), 0);
+    const ligneTotalVersements = feuilleVersements.addRow([
+      'TOTAL',
+      '',
+      '',
+      totalVersements,
+      '',
+      '',
+      '',
+    ]);
+    ligneTotalVersements.font = { bold: true };
+    ligneTotalVersements.eachCell((cellule) => {
+      cellule.border = { top: { style: 'thin', color: { argb: 'FF1C1B1A' } } };
+    });
+
+    feuilleVersements.getColumn(4).numFmt = '# ##0';
+    feuilleVersements.getColumn(4).alignment = { horizontal: 'right' };
+
+    // --- Feuille 3 : pénalités ---------------------------------------------
     const feuillePenalites = classeur.addWorksheet(`Pénalités ${annee}`);
 
     feuillePenalites.columns = [
@@ -256,7 +333,7 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
     feuillePenalites.getColumn(5).numFmt = '# ##0';
     feuillePenalites.getColumn(5).alignment = { horizontal: 'right' };
 
-    // --- Feuille 3 : dépenses ----------------------------------------------
+    // --- Feuille 4 : dépenses ----------------------------------------------
     const depenses = await lireDepenses(annee);
     const feuilleDepenses = classeur.addWorksheet(`Dépenses ${annee}`);
 
@@ -321,7 +398,7 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
 
     const ligneSolde = feuilleDepenses.addRow([
       'SOLDE DE CAISSE',
-      `cotisations ${formaterMontant(situation.cotisations)} + pénalités ${formaterMontant(situation.penalites)} − dépenses ${formaterMontant(situation.depenses)}`,
+      `cotisations versées ${formaterMontant(situation.cotisations)} + pénalités ${formaterMontant(situation.penalites)} − dépenses ${formaterMontant(situation.depenses)}`,
       '',
       situation.solde,
       '',
@@ -495,6 +572,17 @@ routeur.get('/historique.pdf', async (requete, reponse) => {
         document.y
       );
 
+    // Le tableau range les montants sur le mois dû ; la caisse, elle, compte les
+    // versements au jour de leur remise. Le dire ici évite qu'on cherche à
+    // retrouver le solde en additionnant les colonnes.
+    document.moveDown(0.3);
+    document.text(
+      'Montants rangés sur le mois de cotisation dû. Le solde de caisse compte les versements ' +
+        'à leur date de remise — le détail figure dans la feuille « Versements » de l’export Excel.',
+      document.page.margins.left,
+      document.y
+    );
+
     // --- Page 2 : pénalités et suspensions ---------------------------------
     document.addPage();
     dessinerEnTete(document, annee);
@@ -632,7 +720,7 @@ routeur.get('/historique.pdf', async (requete, reponse) => {
           ? `solde d'ouverture au ${formaterDate(situation.ouverture.date)} ` +
             `${formaterMontant(situation.ouverture.montant)} + `
           : '') +
-          `cotisations validées ${formaterMontant(situation.cotisations)} ` +
+          `cotisations versées ${formaterMontant(situation.cotisations)} ` +
           `+ pénalités encaissées ${formaterMontant(situation.penalites)} ` +
           `− dépenses ${formaterMontant(situation.depenses)}`,
         document.page.margins.left,

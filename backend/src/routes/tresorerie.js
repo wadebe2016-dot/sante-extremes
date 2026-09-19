@@ -66,8 +66,11 @@ async function lireSoldeOuverture() {
  * au premier changement de regle.
  *
  *   solde = ouverture
- *         + cotisations validees et penalites encaissees depuis la date d'ouverture
+ *         + cotisations versees et penalites encaissees depuis la date d'ouverture
  *         - decaissements depuis cette date
+ *
+ * « Versees » et non « du mois » : le point de depart est une date de caisse, il
+ * se compare a des dates de caisse. Voir le detail dans la requete.
  *
  * Sans solde d'ouverture, tout l'historique est compte.
  *
@@ -77,19 +80,40 @@ async function calculerSoldeReel() {
   const ouverture = await lireSoldeOuverture();
   const depuis = ouverture ? ouverture.date : null;
 
+  // TROIS DATES, TROIS USAGES. « date_paiement » porte le MOIS DÛ : une
+  // cotisation de septembre est datée du 5 du mois. « date_validation » porte le
+  // contrôle du trésorier. Ni l'une ni l'autre ne dit quand l'argent est entré en
+  // caisse : c'est « date_versement », le jour de la remise.
+  //
+  // La caisse se compte donc sur la date de versement, sinon une cotisation de
+  // septembre remise le 18 tombait du solde d'ouverture posé ce même 18 : sa
+  // date_paiement (le 5) précède la date d'ouverture alors que l'argent, lui,
+  // est arrivé après.
+  //
+  // COALESCE en cascade, du plus juste au plus ancien : les lignes écrites avant
+  // la colonne « date_versement » retombent sur leur validation, et celles
+  // d'avant « date_validation » sur leur mois dû — la seule date qu'elles aient
+  // jamais portée.
+  //
+  // Comparaison de chaînes : les dates sont en AAAA-MM-JJ, éventuellement
+  // suivies de l'heure (« 2026-09-18T12:00:00Z »). L'ordre lexicographique reste
+  // chronologique, et un versement le jour même de l'ouverture est compté.
   const cotisations = await lireUne(
     `SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre
        FROM cotisations
       WHERE statut = 'validee'
-        ${depuis ? 'AND date_paiement >= ?' : ''}`,
+        ${depuis ? 'AND COALESCE(date_versement, date_validation, date_paiement) >= ?' : ''}`,
     depuis ? [depuis] : []
   );
 
+  // Même logique pour les pénalités : « date_reglement » est l'entrée en caisse,
+  // et une pénalité réglée sans date connue retombe sur sa date de sanction
+  // plutôt que de disparaître du solde.
   const penalites = await lireUne(
     `SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre
        FROM sanctions
       WHERE type = 'penalite' AND statut = 'reglee'
-        ${depuis ? 'AND date_reglement >= ?' : ''}`,
+        ${depuis ? 'AND COALESCE(date_reglement, date_sanction) >= ?' : ''}`,
     depuis ? [depuis] : []
   );
 

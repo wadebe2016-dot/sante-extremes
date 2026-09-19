@@ -85,6 +85,10 @@ function lireToutes(sql, parametres = []) {
  * base de production existante, les colonnes nouvelles doivent être posées une
  * par une. Chaque entrée est purement additive et porte sa valeur par défaut,
  * de sorte que les lignes déjà écrites gardent le comportement d'avant.
+ *
+ * Une entrée peut porter un ordre « apres » : une requête jouée juste après
+ * l'ALTER, donc une seule fois dans la vie de la base, pour donner une valeur de
+ * départ aux lignes existantes.
  */
 const COLONNES_AJOUTEES = {
   cotisations: [
@@ -95,6 +99,18 @@ const COLONNES_AJOUTEES = {
     { nom: 'cle_s3', definition: 'TEXT' },
     // LOT 3 ter — qui a validé, refusé ou saisi cette cotisation
     { nom: 'valide_par', definition: 'TEXT' },
+    // Date de versement — le jour où l'argent a réellement été remis. C'est la
+    // seule date qui compte pour la caisse : « date_paiement » porte le mois dû
+    // (le 5 du mois), « date_validation » le contrôle du trésorier.
+    {
+      nom: 'date_versement',
+      definition: 'DATETIME',
+      // Remplissage UNIQUE, au moment même de l'ajout de la colonne : pour une
+      // ligne déjà en base, l'entrée en caisse la plus proche de la vérité est
+      // sa validation, et à défaut son mois dû. La requête ne se rejoue jamais,
+      // la colonne n'étant ajoutée qu'une fois.
+      apres: 'UPDATE cotisations SET date_versement = COALESCE(date_validation, date_paiement)',
+    },
   ],
   sanctions: [
     // LOT 3 ter — qui a encaissé la pénalité
@@ -148,6 +164,14 @@ async function completerColonnes() {
 
       await executer(`ALTER TABLE ${table} ADD COLUMN ${colonne.nom} ${colonne.definition}`);
       console.log(`[migration] colonne ajoutée : ${table}.${colonne.nom}`);
+
+      // Valeur de départ des lignes déjà écrites, posée une seule fois.
+      if (colonne.apres) {
+        const resultat = await executer(colonne.apres);
+        console.log(
+          `[migration] ${table}.${colonne.nom} initialisée sur ${resultat.changements} ligne(s)`
+        );
+      }
     }
   }
 }

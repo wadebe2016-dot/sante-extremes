@@ -636,3 +636,120 @@ cd ~/sante-extremes/backend && git pull && npm run migrate && sudo systemctl res
 ```
 
 Aucune variable d'environnement à changer : les trésoriers utilisent le code qu'ils ont déjà.
+
+---
+
+## Date de versement — trois dates, trois usages
+
+### Le défaut
+
+Une cotisation portait deux dates, et la caisse se calculait sur la mauvaise.
+
+`date_paiement` vaut **le 5 du mois concerné** : c'est la convention du champ `mois`, celle qui range
+un règlement dans la bonne colonne du tableau annuel. Le solde de trésorerie comparait cette date à
+celle du solde d'ouverture. Conséquence : une cotisation de septembre remise le 18 septembre, alors
+qu'un solde d'ouverture venait d'être posé au 18, était datée du 5 — donc antérieure au point de
+départ, donc **jamais entrée en caisse**. L'argent était là, le solde l'ignorait.
+
+Se rabattre sur `date_validation` ne réglait que la moitié du problème : une déclaration tardive
+portant sur un versement déjà encaissé *avant* l'ouverture aurait alors été comptée **deux fois**.
+Il manquait la seule date qui compte pour une caisse : **celle où l'argent a été remis**.
+
+### Les trois dates
+
+| Colonne | Ce qu'elle dit | Ce qu'elle décide |
+| --- | --- | --- |
+| `date_paiement` | **mois dû** — le 5 du mois concerné | statut payé/impayé de `/api/stats`, `/api/historique`, tableaux des exports |
+| `date_versement` | **entrée en caisse** — jour de la remise | trésorerie, et rien d'autre : `solde_reel` de `/api/tresorerie` et `/api/stats` |
+| `date_validation` | **contrôle du trésorier** | traçabilité et `/api/journal` |
+
+Le solde retient une cotisation validée si
+`COALESCE(date_versement, date_validation, date_paiement) >= date d'ouverture`. Le repli en cascade
+va du plus juste au plus ancien : une ligne écrite avant cette évolution retombe sur sa validation,
+et une ligne d'avant le LOT 3 bis sur son mois dû — la seule date qu'elle ait jamais portée. Rien ne
+disparaît du solde, jamais. Même principe pour les pénalités :
+`COALESCE(date_reglement, date_sanction)`. Les décaissements étaient déjà justes, leur
+`date_paiement` étant bien la date de sortie de caisse.
+
+### Backend
+
+| Point | Avant | Après |
+| --- | --- | --- |
+| Colonne | — | `cotisations.date_versement DATETIME NULL`, migration additive |
+| Lignes existantes | — | remplies **une seule fois** avec `COALESCE(date_validation, date_paiement)`, au moment de l'`ALTER` |
+| `POST /api/cotisations` · `/declarer` | deux dates | champ `date_versement` (`AAAA-MM-JJ`) **obligatoire** |
+| Refus | — | absente ou vide → 400 « La date du versement est obligatoire » ; à venir → 400 ; > 12 mois → 400 ; jour inexistant → 400 |
+| `calculerSoldeReel` | `date_paiement >= ouverture` | `COALESCE(date_versement, date_validation, date_paiement) >= ouverture` |
+| `/api/cotisations/en-attente` · `/api/stats` · `/api/journal` | — | `date_versement` et `regularisation` exposés |
+| `/api/journal` | « Cotisation validée » | « **Cotisation de mai versée le 18 sept** », ou « Cotisation de septembre » |
+| Export Excel | 3 feuilles | 4 feuilles — **« Versements »** : membre, mois dû, date de remise, montant, moyen, régularisation, validé par |
+| Export PDF | — | note sous le tableau : montants rangés sur le mois dû, la caisse compte les versements |
+| `export.js` | second calcul de solde, divergent | appelle `calculerSoldeReel` — un seul chiffre pour l'assemblée |
+
+**Aucune valeur par défaut côté serveur.** Le serveur ne devine pas une date de caisse : une saisie
+de rattrapage faite un mois plus tard serait comptée au mauvais moment sans que personne ne s'en
+aperçoive. La date est enregistrée à **midi UTC**, pour que la journée reste la même sous tous les
+fuseaux.
+
+`/api/historique`, le statut du mois de `/api/stats` et les **tableaux** des exports continuent de
+lire `date_paiement` : le mois de cotisation ne change pas. Un arriéré de mars reste en mars.
+
+### Application
+
+- **« Déclarer mon paiement »** et onglet **« Saisir »** du trésorier : champ **Date du versement**,
+  sélecteur de date, pré-rempli à aujourd'hui, borné aux **douze derniers mois** — la même fenêtre
+  que le serveur. Aide : « Le jour où l'argent a été remis, pas le jour de la déclaration. »
+- Le champ est **obligatoire** : bordure rouge et **bouton d'envoi fermé** tant qu'aucune date n'est
+  retenue. Inutile de laisser partir une saisie complète vers un 400.
+- **« À valider »** : sous le montant, « **versé le 12 sept** » ; si régularisation, la mention
+  « **Régularisation — mois de mai** » en orange, pour qu'un mois réglé après coup ne soit pas refusé
+  par réflexe comme un doublon.
+- **Écran État**, sous-ligne d'un membre à jour : « **Septembre · versé le 12 sept · 10 000 · Espèce** ».
+- **Écran Trésorerie**, aide du solde d'ouverture : « seuls les versements reçus à partir de cette
+  date s'ajoutent au solde. C'est le jour où l'argent a été remis qui compte, pas le mois de
+  cotisation réglé. »
+- Rien d'autre ne bouge : navigation, charte et écrans existants inchangés.
+
+### Vérifications
+
+Backend : `npm test` — 20 tests, base SQLite temporaire, aucun accès réseau.
+
+| Cas | Attendu | Obtenu |
+| --- | --- | --- |
+| Mois septembre, `date_versement` 2026-09-12, ouverture au 2026-09-18 | hors du solde | OK — solde = ouverture seule |
+| La même, « payée » pour septembre dans `/api/stats` et `/api/historique` | mois dû inchangé | OK — `paid: true`, `statut_mois: paye`, montant en septembre |
+| Même cotisation, `date_versement` 2026-09-18 | comptée | OK — solde = ouverture + 10 000 |
+| `date_versement` absente sur une ligne ancienne | repli sur `date_validation` | OK — validée le 19 comptée, le 13 non |
+| Ni versement ni validation (ligne d'avant le LOT 3 bis) | repli sur le mois dû | OK |
+| `date_versement` dans le futur | 400 | OK — « ne peut pas être dans le futur », rien écrit en base |
+| `date_versement` antérieure de 13 mois | 400 | OK — « pas antérieure de plus de 12 mois » |
+| `date_versement` à exactement 12 mois | 201 | OK |
+| `date_versement` absente ou vide | 400 | OK — « La date du versement est obligatoire » |
+| `date_versement` = 2026-02-31 | 400 | OK — « jour inexistant » |
+| Rattrapage (mois dû − 3 mois, versé ce jour) | `regularisation: true` | OK |
+| `/api/historique` et exports | inchangés | OK — mêmes totaux, feuille « Versements » en plus |
+| `/api/journal` sur une régularisation | libellé nommé | OK — « Cotisation de mai versée le 18 sept » |
+| Migration sur une base d'avant | colonne ajoutée, lignes remplies | OK — 3 lignes initialisées, aucune colonne perdue |
+| Migration rejouée | ne réécrit rien | OK — la valeur corrigée à la main survit |
+| Pénalités | `date_reglement`, repli sur `date_sanction` | OK |
+
+Application : `flutter analyze` → **0 erreur, 0 avertissement** (94 infos de style, inchangées).
+`flutter test` → **18 tests verts**. APK release arm64 construit en local.
+
+### Résumé pour l'architecte
+
+1. Une cotisation porte désormais **trois dates** : mois dû (`date_paiement`), entrée en caisse
+   (`date_versement`), contrôle du trésorier (`date_validation`).
+2. Le solde de trésorerie se calcule sur la **date de versement**, avec repli en cascade sur les
+   dates connues des lignes anciennes : aucun montant ne disparaît.
+3. `date_versement` est **obligatoire** à la saisie et à la déclaration ; refusée si future ou
+   vieille de plus de douze mois.
+4. Le **mois de cotisation ne change pas** : historique, statut du mois et tableaux des exports
+   restent sur `date_paiement`.
+5. Migration **purement additive**, remplissage unique des lignes existantes.
+6. Déploiement sur l'instance :
+   `cd ~/sante-extremes/backend && git pull && npm install && npm run migrate && sudo systemctl restart sde-api`
+7. **Aucune variable d'environnement à changer.**
+8. Consigne aux membres : indiquer **le jour où l'argent a été remis** — pas celui de la déclaration —
+   et le **mois réglé** séparément. La date de remise fait le solde de caisse, le mois réglé remplit
+   la ligne du tableau annuel.

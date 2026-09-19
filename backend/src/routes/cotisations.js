@@ -1,12 +1,28 @@
 /**
  * Route d'enregistrement des paiements de cotisation.
  *   POST /api/cotisations  (trésorier — multipart/form-data)
- *   champs : member_id, montant, moyen, mois (facultatif), fichier (facultatif)
+ *   champs : member_id, montant, moyen, date_versement, mois (facultatif),
+ *            fichier (facultatif)
  *
  * Le justificatif est déposé sur S3, puis la cotisation est écrite en base.
  *
  * LOT 3 : la route passe sous le code trésorier, et accepte un mois de
  * rattrapage (saisie d'un paiement reçu au titre d'un mois antérieur).
+ *
+ * TROIS DATES, TROIS USAGES — la confusion entre les deux premières faisait
+ * disparaître de l'argent du solde de caisse :
+ *
+ *   date_paiement    MOIS DÛ. Le 5 du mois concerné, par convention du champ
+ *                    « mois ». Sert à la répartition mensuelle : statut
+ *                    payé/impayé, historique annuel, exports.
+ *   date_versement   ENTRÉE EN CAISSE. Le jour où l'argent a été remis, saisi
+ *                    par le membre ou le trésorier. OBLIGATOIRE. Sert à la
+ *                    trésorerie, et à elle seule.
+ *   date_validation  CONTRÔLE DU TRÉSORIER. Posée à la validation. Sert à la
+ *                    traçabilité et au journal.
+ *
+ * Une cotisation dont le mois dû précède le mois du versement est une
+ * « régularisation » : le drapeau est calculé, jamais stocké.
  */
 'use strict';
 
@@ -69,6 +85,96 @@ function convertirMoisEnDate(valeur) {
   return { date: `${mois}-05T12:00:00Z` };
 }
 
+/** Ancienneté maximale acceptée pour une date de versement, en mois. */
+const VERSEMENT_ANTERIORITE_MOIS = 12;
+
+/** Jour courant au format AAAA-MM-JJ, en temps universel. */
+function aujourdhui() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/**
+ * Valide la date de versement — le jour où l'argent a été remis.
+ *
+ * C'est la date qui fait entrer la somme en caisse, donc la seule que le
+ * trésorier ne peut pas laisser deviner : elle est OBLIGATOIRE. Le serveur ne
+ * lui substitue aucune valeur par défaut, faute de quoi une saisie de rattrapage
+ * faite un mois plus tard serait comptée au mauvais moment sans que personne
+ * ne s'en aperçoive.
+ *
+ * Deux bornes, pour les mêmes raisons :
+ *   - pas de date à venir : on ne constate pas un versement qui n'a pas eu lieu ;
+ *   - pas plus de douze mois en arrière : au-delà, c'est une erreur de frappe
+ *     bien plus souvent qu'un versement oublié, et la somme retomberait avant
+ *     tout solde d'ouverture raisonnable.
+ *
+ * @param {*} valeur date reçue, au format AAAA-MM-JJ
+ * @returns {{date: string}|{erreur: string}} date ISO à enregistrer, ou motif de refus
+ */
+function lireDateVersement(valeur) {
+  const brut = String(valeur === undefined || valeur === null ? '' : valeur).trim();
+
+  if (brut === '') {
+    return { erreur: 'La date du versement est obligatoire' };
+  }
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(brut)) {
+    return { erreur: 'Date de versement invalide (format attendu : AAAA-MM-JJ)' };
+  }
+
+  // La forme ne suffit pas : « 2026-02-31 » passe l'expression régulière. Un
+  // aller-retour par Date le démasque, le 31 février devenant le 3 mars.
+  const horodatage = Date.parse(`${brut}T12:00:00Z`);
+  if (Number.isNaN(horodatage) || new Date(horodatage).toISOString().slice(0, 10) !== brut) {
+    return { erreur: 'Date de versement invalide (jour inexistant)' };
+  }
+
+  const jour = aujourdhui();
+  if (brut > jour) {
+    return { erreur: 'La date du versement ne peut pas être dans le futur' };
+  }
+
+  // Comparaison lexicographique : le format AAAA-MM-JJ la rend chronologique.
+  const maintenant = new Date();
+  const borne = new Date(
+    Date.UTC(
+      maintenant.getUTCFullYear(),
+      maintenant.getUTCMonth() - VERSEMENT_ANTERIORITE_MOIS,
+      maintenant.getUTCDate()
+    )
+  )
+    .toISOString()
+    .slice(0, 10);
+
+  if (brut < borne) {
+    return {
+      erreur: `La date du versement ne peut pas être antérieure de plus de ${VERSEMENT_ANTERIORITE_MOIS} mois`,
+    };
+  }
+
+  // Midi en temps universel, comme la date de mois dû : la journée reste la même
+  // quel que soit le fuseau de lecture.
+  return { date: `${brut}T12:00:00Z` };
+}
+
+/**
+ * Une cotisation est-elle une régularisation ?
+ *
+ * Vrai lorsque le mois dû précède le mois du versement : l'argent a été remis
+ * après le mois qu'il couvre. C'est ce qui distingue « Cotisation de septembre »
+ * de « Cotisation de mai versée le 18 sept ».
+ *
+ * @param {string} moisDu date de mois dû (date_paiement)
+ * @param {string} versement date de versement
+ * @returns {boolean}
+ */
+function estRegularisation(moisDu, versement) {
+  const du = String(moisDu || '').slice(0, 7);
+  const remis = String(versement || '').slice(0, 7);
+  if (du.length !== 7 || remis.length !== 7) return false;
+  return du < remis;
+}
+
 routeur.post(
   '/',
   // 1. Contrôle du code trésorier AVANT de lire le fichier : inutile de
@@ -113,6 +219,13 @@ routeur.post(
       datePaiement = conversion.date;
     }
 
+    // Date de remise de l'argent : obligatoire, c'est elle qui fait la caisse.
+    const versement = lireDateVersement(requete.body?.date_versement);
+    if (versement.erreur) {
+      console.warn(`[cotisations] refus : date de versement — ${versement.erreur}`);
+      return reponse.status(400).json({ error: versement.erreur });
+    }
+
     try {
       const membre = await lireUne('SELECT id, name FROM members WHERE id = ?', [idMembre]);
       if (!membre) {
@@ -140,24 +253,30 @@ routeur.post(
       // Saisie par le trésorier : la cotisation est validée d'emblée.
       const resultat = datePaiement
         ? await executer(
-            `INSERT INTO cotisations (member_id, montant, moyen, fichier_s3_url, date_paiement, statut, date_validation, valide_par)
-             VALUES (?, ?, ?, ?, ?, 'validee', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?)`,
-            [idMembre, montant, moyen, urlJustificatif, datePaiement, requete.agent]
+            `INSERT INTO cotisations (member_id, montant, moyen, fichier_s3_url, date_paiement, date_versement, statut, date_validation, valide_par)
+             VALUES (?, ?, ?, ?, ?, ?, 'validee', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?)`,
+            [idMembre, montant, moyen, urlJustificatif, datePaiement, versement.date, requete.agent]
           )
         : await executer(
-            `INSERT INTO cotisations (member_id, montant, moyen, fichier_s3_url, statut, date_validation, valide_par)
-             VALUES (?, ?, ?, ?, 'validee', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?)`,
-            [idMembre, montant, moyen, urlJustificatif, requete.agent]
+            `INSERT INTO cotisations (member_id, montant, moyen, fichier_s3_url, date_versement, statut, date_validation, valide_par)
+             VALUES (?, ?, ?, ?, ?, 'validee', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?)`,
+            [idMembre, montant, moyen, urlJustificatif, versement.date, requete.agent]
           );
 
       const cotisation = await lireUne(
-        'SELECT id, member_id, montant, moyen, fichier_s3_url, date_paiement, valide_par FROM cotisations WHERE id = ?',
+        `SELECT id, member_id, montant, moyen, fichier_s3_url, date_paiement, date_versement, valide_par
+           FROM cotisations WHERE id = ?`,
         [resultat.id]
+      );
+      cotisation.regularisation = estRegularisation(
+        cotisation.date_paiement,
+        cotisation.date_versement
       );
 
       const mention = datePaiement ? ` — rattrapage ${String(moisDemande).trim()}` : '';
       console.log(
-        `[cotisations] paiement enregistré : #${cotisation.id} — ${membre.name} — ${montant} (${moyen})${mention}`
+        `[cotisations] paiement enregistré : #${cotisation.id} — ${membre.name} — ${montant} (${moyen})` +
+          `${mention} — versé le ${versement.date.slice(0, 10)}`
       );
       return reponse.status(201).json(cotisation);
     } catch (erreur) {
@@ -202,7 +321,11 @@ function quotaDeclarationsDepasse(source) {
 
 /**
  * POST /api/cotisations/declarer — déclaration par le membre (PUBLIQUE).
- * multipart : member_id, mois (AAAA-MM), montant, moyen, fichier (obligatoire).
+ * multipart : member_id, mois (AAAA-MM), date_versement (AAAA-MM-JJ), montant,
+ * moyen, fichier (obligatoire en Mobile Money).
+ *
+ * Le membre déclare deux choses distinctes : le mois qu'il règle, et le jour où
+ * il a remis l'argent. La seconde est celle qui comptera en caisse.
  */
 routeur.post(
   '/declarer',
@@ -233,6 +356,12 @@ routeur.post(
     const conversion = convertirMoisEnDate(moisDemande);
     if (conversion.erreur) {
       return reponse.status(400).json({ error: conversion.erreur });
+    }
+
+    const versement = lireDateVersement(requete.body?.date_versement);
+    if (versement.erreur) {
+      console.warn(`[declaration] refus : date de versement — ${versement.erreur}`);
+      return reponse.status(400).json({ error: versement.erreur });
     }
 
     // Reçu obligatoire en Mobile Money, facultatif en espèces (LOT 3 bis) :
@@ -284,14 +413,14 @@ routeur.post(
         : { url: null, cle: null };
 
       const resultat = await executer(
-        `INSERT INTO cotisations (member_id, montant, moyen, fichier_s3_url, cle_s3, statut, date_paiement)
-         VALUES (?, ?, ?, ?, ?, 'en_attente', ?)`,
-        [idMembre, montant, moyen, depot.url, depot.cle, conversion.date]
+        `INSERT INTO cotisations (member_id, montant, moyen, fichier_s3_url, cle_s3, statut, date_paiement, date_versement)
+         VALUES (?, ?, ?, ?, ?, 'en_attente', ?, ?)`,
+        [idMembre, montant, moyen, depot.url, depot.cle, conversion.date, versement.date]
       );
 
       console.log(
         `[declaration] déclaration reçue : #${resultat.id} — ${membre.name} — ` +
-          `${montant} (${moyen}) pour ${moisDemande}`
+          `${montant} (${moyen}) pour ${moisDemande}, versé le ${versement.date.slice(0, 10)}`
       );
 
       return reponse.status(201).json({
@@ -300,6 +429,8 @@ routeur.post(
         montant,
         moyen,
         mois: moisDemande,
+        date_versement: versement.date,
+        regularisation: estRegularisation(conversion.date, versement.date),
         statut: 'en_attente',
         message: 'Déclaration envoyée, en attente de validation par le trésorier',
       });
@@ -315,7 +446,7 @@ routeur.get('/en-attente', exigerRole('tresorier'), async (requete, reponse) => 
   try {
     const lignes = await lireToutes(
       `SELECT c.id, c.member_id, m.name AS member_name, c.montant, c.moyen,
-              c.date_paiement, c.cle_s3, c.fichier_s3_url
+              c.date_paiement, c.date_versement, c.cle_s3, c.fichier_s3_url
          FROM cotisations c
          JOIN members m ON m.id = c.member_id
         WHERE c.statut = 'en_attente'
@@ -343,6 +474,10 @@ routeur.get('/en-attente', exigerRole('tresorier'), async (requete, reponse) => 
           moyen: ligne.moyen,
           mois: String(ligne.date_paiement).slice(0, 7),
           date_paiement: ligne.date_paiement,
+          // Le trésorier doit voir la date de remise avant de valider : c'est
+          // elle qui décidera du solde, et lui seul peut la contester.
+          date_versement: ligne.date_versement || null,
+          regularisation: estRegularisation(ligne.date_paiement, ligne.date_versement),
           justificatif_url: url,
         };
       })
@@ -501,3 +636,8 @@ routeur.post('/:id/refuser', exigerRole('tresorier'), async (requete, reponse) =
 });
 
 module.exports = routeur;
+// Partagés avec /api/stats, /api/journal et les exports : la règle de la
+// régularisation doit être la même partout, et la validation de la date de
+// versement ne doit exister qu'en un seul endroit.
+module.exports.estRegularisation = estRegularisation;
+module.exports.lireDateVersement = lireDateVersement;

@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "node src/index.js",
+    "test": "node --test \"tests/**/*.test.js\"",
     "dev": "node --watch src/index.js",
     "migrate": "node src/db.js",
     "db:restore": "node scripts/s3-db-sync.js restore",

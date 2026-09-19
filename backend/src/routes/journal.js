@@ -11,6 +11,10 @@
  * LOT 3 ter (valide_par, encaisse_par, approuve_par, decaisse_par) et par
  * parametres.definit_par pour le solde d'ouverture.
  *
+ * Une cotisation y est rangée à sa date de VALIDATION — c'est la décision qui
+ * fait l'événement — et porte en plus sa date de versement : « Cotisation de mai
+ * versée le 18 sept » quand l'argent a été remis après le mois qu'il couvre.
+ *
  * Ce que le journal ne contient JAMAIS :
  *   - les fiches santé, ni leur existence — ce sont des données de santé ;
  *   - la moindre clé S3 ou URL de justificatif — le fil est public, les pièces
@@ -22,13 +26,20 @@
 
 const express = require('express');
 const { lireUne, lireToutes } = require('../db');
-const { lireAnnee } = require('./historique');
+const { lireAnnee, MOIS } = require('./historique');
 const { CATEGORIES } = require('./demandes');
+const { estRegularisation } = require('./cotisations');
 
 const routeur = express.Router();
 
 const LIMITE_DEFAUT = 100;
 const LIMITE_MAX = 500;
+
+/** Mois en toutes lettres, index 0 = janvier. MOIS, lui, porte les abréviations. */
+const MOIS_LONGS = Object.freeze([
+  'janvier', 'février', 'mars', 'avril', 'mai', 'juin',
+  'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre',
+]);
 
 /**
  * Types d'événement et leur libellé, pour que l'application n'ait pas à les
@@ -64,6 +75,44 @@ function acteurLisible(valeur) {
   return LIBELLE_ROLE[valeur] || valeur;
 }
 
+/** Mois en toutes lettres d'une date ISO : « mai ». */
+function moisLong(iso) {
+  const numero = Number(String(iso || '').slice(5, 7));
+  return numero >= 1 && numero <= 12 ? MOIS_LONGS[numero - 1] : null;
+}
+
+/** Jour abrégé d'une date ISO : « 18 sept ». */
+function jourCourt(iso) {
+  const texte = String(iso || '');
+  const jour = Number(texte.slice(8, 10));
+  const numero = Number(texte.slice(5, 7));
+  if (!jour || numero < 1 || numero > 12) return null;
+  return `${jour} ${MOIS[numero - 1]}`;
+}
+
+/**
+ * Libellé d'une cotisation validée.
+ *
+ * Le journal doit répondre à la question qu'on lui pose : « qu'est-ce qui est
+ * entré en caisse ce jour-là ? ». Un mois dû antérieur au mois du versement est
+ * une régularisation, et le taire donnerait l'impression d'un doublon — deux
+ * lignes de cotisation le même jour pour le même membre.
+ *
+ *   « Cotisation de mai versée le 18 sept »   régularisation
+ *   « Cotisation de septembre »               versement dans son mois
+ *
+ * @returns {string} libellé, ou celui du type si les dates manquent
+ */
+function libelleCotisation(moisDu, versement, regularisation) {
+  const mois = moisLong(moisDu);
+  if (!mois) return TYPES.cotisation_validee;
+
+  if (!regularisation) return `Cotisation de ${mois}`;
+
+  const jour = jourCourt(versement);
+  return jour ? `Cotisation de ${mois} versée le ${jour}` : `Cotisation de ${mois} · régularisation`;
+}
+
 /** GET /api/journal — fil chronologique des décisions et mouvements */
 routeur.get('/', async (requete, reponse) => {
   const lecture = lireAnnee(requete.query.annee);
@@ -92,7 +141,9 @@ routeur.get('/', async (requete, reponse) => {
                m.name AS membre,
                c.montant AS montant,
                c.motif_refus AS detail,
-               c.valide_par AS acteur
+               c.valide_par AS acteur,
+               c.date_paiement AS mois_du,
+               COALESCE(c.date_versement, c.date_validation) AS versement
           FROM cotisations c
           JOIN members m ON m.id = c.member_id
          WHERE c.statut IN ('validee', 'refusee')
@@ -107,7 +158,9 @@ routeur.get('/', async (requete, reponse) => {
                m.name AS membre,
                s.montant AS montant,
                s.motif AS detail,
-               'censeur' AS acteur
+               'censeur' AS acteur,
+               NULL AS mois_du,
+               NULL AS versement
           FROM sanctions s
           JOIN members m ON m.id = s.member_id
          WHERE s.statut <> 'annulee'
@@ -121,7 +174,9 @@ routeur.get('/', async (requete, reponse) => {
                m.name AS membre,
                s.montant AS montant,
                s.moyen_reglement AS detail,
-               s.encaisse_par AS acteur
+               s.encaisse_par AS acteur,
+               NULL AS mois_du,
+               NULL AS versement
           FROM sanctions s
           JOIN members m ON m.id = s.member_id
          WHERE s.type = 'penalite' AND s.statut = 'reglee'
@@ -136,7 +191,9 @@ routeur.get('/', async (requete, reponse) => {
                m.name AS membre,
                NULL AS montant,
                s.motif AS detail,
-               'censeur' AS acteur
+               'censeur' AS acteur,
+               NULL AS mois_du,
+               NULL AS versement
           FROM sanctions s
           JOIN members m ON m.id = s.member_id
          WHERE s.type = 'suspension' AND s.statut = 'levee'
@@ -150,7 +207,9 @@ routeur.get('/', async (requete, reponse) => {
                d.libelle AS membre,
                d.montant_estime AS montant,
                d.categorie AS detail,
-               d.role_demandeur AS acteur
+               d.role_demandeur AS acteur,
+               NULL AS mois_du,
+               NULL AS versement
           FROM demandes d
          WHERE strftime('%Y', d.date_demande) = ?
 
@@ -162,7 +221,9 @@ routeur.get('/', async (requete, reponse) => {
                d.libelle AS membre,
                d.montant_estime AS montant,
                COALESCE(d.motif_refus, d.categorie) AS detail,
-               d.approuve_par AS acteur
+               d.approuve_par AS acteur,
+               NULL AS mois_du,
+               NULL AS versement
           FROM demandes d
          WHERE d.date_decision IS NOT NULL
            AND d.statut IN ('approuvee', 'refusee', 'payee')
@@ -176,7 +237,9 @@ routeur.get('/', async (requete, reponse) => {
                d.libelle AS membre,
                x.montant AS montant,
                d.categorie AS detail,
-               x.decaisse_par AS acteur
+               x.decaisse_par AS acteur,
+               NULL AS mois_du,
+               NULL AS versement
           FROM decaissements x
           JOIN demandes d ON d.id = x.demande_id
          WHERE strftime('%Y', x.date_paiement) = ?
@@ -189,7 +252,9 @@ routeur.get('/', async (requete, reponse) => {
                o.nom_fichier AS membre,
                NULL AS montant,
                NULL AS detail,
-               'secretaire' AS acteur
+               'secretaire' AS acteur,
+               NULL AS mois_du,
+               NULL AS versement
           FROM documents o
          WHERE o.type = 'reglement'
            AND strftime('%Y', o.date_depot) = ?
@@ -200,17 +265,30 @@ routeur.get('/', async (requete, reponse) => {
       [anneeTexte, anneeTexte, anneeTexte, anneeTexte, anneeTexte, anneeTexte, anneeTexte, anneeTexte, limite]
     );
 
-    const evenements = lignes.map((ligne) => ({
-      date: ligne.date,
-      type: ligne.type,
-      type_libelle: TYPES[ligne.type] || ligne.type,
-      // « sujet » plutôt que « membre » : selon l'événement, c'est un membre,
-      // un libellé de dépense ou un nom de fichier.
-      sujet: ligne.membre,
-      montant: ligne.montant === null ? null : Number(ligne.montant),
-      detail: CATEGORIES[ligne.detail] || ligne.detail || null,
-      acteur: acteurLisible(ligne.acteur),
-    }));
+    const evenements = lignes.map((ligne) => {
+      const regularisation =
+        ligne.type === 'cotisation_validee' && estRegularisation(ligne.mois_du, ligne.versement);
+
+      return {
+        date: ligne.date,
+        type: ligne.type,
+        // Une cotisation validée dit de quel mois elle relève, et le jour de la
+        // remise quand les deux diffèrent. Les autres événements gardent le
+        // libellé de leur type.
+        type_libelle:
+          ligne.type === 'cotisation_validee'
+            ? libelleCotisation(ligne.mois_du, ligne.versement, regularisation)
+            : TYPES[ligne.type] || ligne.type,
+        // « sujet » plutôt que « membre » : selon l'événement, c'est un membre,
+        // un libellé de dépense ou un nom de fichier.
+        sujet: ligne.membre,
+        montant: ligne.montant === null ? null : Number(ligne.montant),
+        detail: CATEGORIES[ligne.detail] || ligne.detail || null,
+        acteur: acteurLisible(ligne.acteur),
+        date_versement: ligne.versement || null,
+        regularisation,
+      };
+    });
 
     // Le solde d'ouverture ne vit pas dans une table d'événements : on l'ajoute
     // à sa place chronologique s'il tombe dans l'année demandée.
@@ -232,6 +310,8 @@ routeur.get('/', async (requete, reponse) => {
             // nom de celui qui l'a fixé. Les soldes posés avant cette ouverture
             // n'ont pas de nom enregistré — ils venaient forcément de l'admin.
             acteur: acteurLisible(ouverture.definit_par) || LIBELLE_ROLE.admin,
+            date_versement: null,
+            regularisation: false,
           });
           evenements.sort((a, b) => String(b.date).localeCompare(String(a.date)));
         }
