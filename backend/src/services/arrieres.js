@@ -419,6 +419,76 @@ async function construireSituation(mois, jour = aujourdhui()) {
   });
 }
 
+/**
+ * Motif d'inéligibilité d'un membre à une séance, ou null s'il peut jouer.
+ *
+ * L'ORDRE COMPTE, et le premier motif rencontré l'emporte :
+ *
+ *   a. suspension active (terme non échu) → « suspendu jusqu'au JJ/MM »
+ *   b. membre mis à l'écart               → « mis à l'écart »
+ *   c. cotisation du mois validée         → ÉLIGIBLE
+ *   d. déclaration en attente             → « déclaration en attente de validation »
+ *   e. adhésion postérieure au mois       → « adhésion à partir de … »
+ *   f. sinon                              → « cotisation de <mois> non versée »
+ *
+ * Une suspension PRIME sur une cotisation à jour : un membre suspendu qui a payé
+ * ne joue pas pour autant. À l'inverse, les pénalités dues n'entrent pas dans ce
+ * calcul — elles sont signalées, jamais bloquantes.
+ *
+ * Vit ici plutôt que dans la route : /api/seance la sert, et /api/stats compte
+ * les éligibles du jour pour le raccourci de l'écran d'accueil. Deux copies de
+ * cette cascade auraient fini par ne plus dire la même chose.
+ *
+ * @param {object} membre état issu de construireSituation
+ * @param {string} mois mois de la séance, AAAA-MM
+ * @returns {string|null} motif, ou null si le membre peut jouer
+ */
+function motifInegibilite(membre, mois) {
+  if (membre.suspendu) {
+    const terme = jourCourt(membre.date_fin_suspension);
+    return terme ? `suspendu jusqu\u2019au ${terme}` : 'suspendu';
+  }
+
+  if (membre.statut === 'ecarte') return 'mis \u00e0 l\u2019\u00e9cart';
+  if (membre.cotisation_mois_validee) return null;
+  if (membre.declaration_en_attente) return 'd\u00e9claration en attente de validation';
+  if (membre.pas_encore_adherent) {
+    return `adh\u00e9sion \u00e0 partir de ${moisAnneeEnLettres(membre.adhesion)}`;
+  }
+
+  return `cotisation de ${moisEnLettres(mois)} non vers\u00e9e`;
+}
+
+/**
+ * Répartit une situation entre les trois listes de mesures du mois.
+ *
+ * Les membres DÉJÀ ÉCARTÉS ne sont proposés à rien : ils ne figurent que dans
+ * les compteurs. Un membre à trois mois ou plus n'apparaît jamais parmi ceux à
+ * pénaliser — la mise à l'écart remplace la pénalité, elle ne s'y ajoute pas.
+ *
+ * Renvoie les entrées brutes de la situation : /api/mesures les met en forme
+ * pour l'écran, /api/stats n'en compte que les longueurs.
+ *
+ * @param {Array<object>} situation issue de construireSituation
+ */
+function classerMesures(situation) {
+  const actifs = situation.filter((membre) => membre.statut === 'actif');
+
+  return {
+    a_penaliser: actifs.filter(
+      (membre) => membre.nb_mois > 0 && membre.nb_mois < SEUIL_ECART && !membre.deja_penalise
+    ),
+    a_ecarter: actifs.filter((membre) => membre.nb_mois >= SEUIL_ECART),
+    peuvent_jouer: actifs.filter((membre) => membre.nb_mois === 0),
+    ecartes_deja: situation.filter((membre) => membre.statut === 'ecarte').length,
+    // Déjà pénalisés pour CE mois : hors des propositions, mais le bureau doit
+    // savoir qu'ils ont été traités, sans quoi la liste paraît trop courte.
+    penalises_deja: actifs.filter(
+      (membre) => membre.deja_penalise && membre.nb_mois > 0 && membre.nb_mois < SEUIL_ECART
+    ).length,
+  };
+}
+
 module.exports = {
   COTISATION_MENSUELLE,
   CONTRIBUTION_MAX,
@@ -446,4 +516,6 @@ module.exports = {
   moisAdhesion,
   statutMembre,
   construireSituation,
+  motifInegibilite,
+  classerMesures,
 };

@@ -31,35 +31,17 @@
 'use strict';
 
 const express = require('express');
+// La cascade d'éligibilité vit dans le service : /api/stats compte elle aussi
+// les éligibles du jour, pour le raccourci de l'écran d'accueil.
 const {
   aujourdhui,
   jourValide,
-  jourCourt,
   moisEnLettres,
-  moisAnneeEnLettres,
   construireSituation,
+  motifInegibilite,
 } = require('../services/arrieres');
 
 const routeur = express.Router();
-
-/**
- * Motif d'inéligibilité d'un membre, ou null s'il peut jouer.
- * @param {object} membre état issu de construireSituation
- * @param {string} mois mois de la séance, AAAA-MM
- */
-function motifInegibilite(membre, mois) {
-  if (membre.suspendu) {
-    const terme = jourCourt(membre.date_fin_suspension);
-    return terme ? `suspendu jusqu’au ${terme}` : 'suspendu';
-  }
-
-  if (membre.statut === 'ecarte') return 'mis à l’écart';
-  if (membre.cotisation_mois_validee) return null;
-  if (membre.declaration_en_attente) return 'déclaration en attente de validation';
-  if (membre.pas_encore_adherent) return `adhésion à partir de ${moisAnneeEnLettres(membre.adhesion)}`;
-
-  return `cotisation de ${moisEnLettres(mois)} non versée`;
-}
 
 /** GET /api/seance — éligibles et non éligibles de la séance du jour. */
 routeur.get('/', async (requete, reponse) => {
@@ -141,4 +123,3 @@ routeur.get('/', async (requete, reponse) => {
 });
 
 module.exports = routeur;
-module.exports.motifInegibilite = motifInegibilite;

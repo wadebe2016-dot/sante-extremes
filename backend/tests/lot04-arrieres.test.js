@@ -889,6 +889,99 @@ test('POST /statut bascule, journalise, et refuse une bascule sans changement', 
 });
 
 // ---------------------------------------------------------------------------
+// Raccourcis de l'écran d'accueil
+// ---------------------------------------------------------------------------
+
+test('/api/stats porte les trois chiffres des raccourcis', async () => {
+  const mois = new Date().toISOString().slice(0, 7);
+  const moisAncien = moisDecale(mois, -4);
+
+  // À jour : il peut jouer, il ne doit rien.
+  await ajouterMembre(1, 'A Jour', mois);
+  await cotiser(1, mois);
+
+  // Un mois de retard : à pénaliser, et il ne peut pas jouer.
+  await ajouterMembre(2, 'Un Mois', mois, 'actif', 5000);
+
+  // Adhérent quatre mois plus tôt, rien versé : cinq mois dus, bornes
+  // comprises. Au-delà du seuil, il est proposé à la mise à l'écart.
+  await ajouterMembre(3, 'Cinq Mois', moisAncien, 'actif', 10000);
+
+  const { code, corps } = await appeler('/api/stats');
+  assert.equal(code, 200);
+
+  const raccourcis = corps.raccourcis;
+  assert.ok(raccourcis, 'le bloc raccourcis doit être présent');
+
+  assert.equal(raccourcis.eligibles_aujourdhui, 1);
+  // 1 × 5 000 + 5 × 10 000 : les contributions ne sont pas uniformes.
+  assert.equal(raccourcis.total_arrieres, 55000);
+  assert.equal(raccourcis.mesures_a_penaliser, 1);
+  assert.equal(raccourcis.mesures_a_ecarter, 1);
+  assert.equal(raccourcis.mesures_en_attente, 2);
+  assert.equal(raccourcis.total_membres_seance, 3);
+});
+
+test('les raccourcis disent les mêmes chiffres que les trois écrans', async () => {
+  const mois = new Date().toISOString().slice(0, 7);
+  const jour = new Date().toISOString().slice(0, 10);
+
+  await ajouterMembre(1, 'A Jour', mois);
+  await cotiser(1, mois);
+  await ajouterMembre(2, 'Un Mois', mois, 'actif', 5000);
+  await ajouterMembre(3, 'Cinq Mois', moisDecale(mois, -4));
+
+  const stats = await appeler('/api/stats');
+  const seance = await appeler(`/api/seance?date=${jour}`);
+  const arrieres = await appeler(`/api/arrieres?mois=${mois}`);
+  const mesures = await appeler(`/api/mesures?mois=${mois}`);
+
+  // C'est tout l'enjeu du bloc : éviter trois appels SANS inventer un second
+  // jeu de chiffres. Le raccourci et l'écran doivent dire la même chose.
+  assert.equal(stats.corps.raccourcis.eligibles_aujourdhui, seance.corps.resume.eligibles);
+  assert.equal(stats.corps.raccourcis.total_arrieres, arrieres.corps.resume.total_arrieres);
+  assert.equal(
+    stats.corps.raccourcis.mesures_en_attente,
+    mesures.corps.resume.a_penaliser + mesures.corps.resume.a_ecarter
+  );
+  assert.equal(stats.corps.raccourcis.mesures_a_penaliser, mesures.corps.resume.a_penaliser);
+  assert.equal(stats.corps.raccourcis.mesures_a_ecarter, mesures.corps.resume.a_ecarter);
+});
+
+test('les raccourcis annoncent la date d’effet et l’applicabilité', async () => {
+  bloquerLesMesures();
+  const bloque = await appeler('/api/stats');
+  assert.equal(bloque.corps.raccourcis.mesures_applicable, false);
+  assert.equal(bloque.corps.raccourcis.date_effet_mesures, '2999-01-01');
+
+  autoriserLesMesures();
+  const ouvert = await appeler('/api/stats');
+  assert.equal(ouvert.corps.raccourcis.mesures_applicable, true);
+});
+
+test('un membre écarté sort des éligibles du raccourci', async () => {
+  const mois = new Date().toISOString().slice(0, 7);
+
+  await ajouterMembre(1, 'A Jour', mois);
+  await cotiser(1, mois);
+  await ajouterMembre(2, 'Ecarte A Jour', mois, 'ecarte');
+  await cotiser(2, mois);
+
+  const { corps } = await appeler('/api/stats');
+  // Il a payé, mais il est à l'écart : il ne foule pas le terrain.
+  assert.equal(corps.raccourcis.eligibles_aujourdhui, 1);
+  assert.equal(corps.raccourcis.total_membres_seance, 2);
+});
+
+test('sans membre, les raccourcis valent zéro plutôt que null', async () => {
+  const { corps } = await appeler('/api/stats');
+
+  assert.equal(corps.raccourcis.eligibles_aujourdhui, 0);
+  assert.equal(corps.raccourcis.total_arrieres, 0);
+  assert.equal(corps.raccourcis.mesures_en_attente, 0);
+});
+
+// ---------------------------------------------------------------------------
 // Droits
 // ---------------------------------------------------------------------------
 

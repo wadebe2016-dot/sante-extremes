@@ -17,6 +17,13 @@
  * remise de l'argent (`date_versement`) n'est ici qu'un détail d'affichage de la
  * sous-ligne : elle ne décide que de la trésorerie.
  *
+ * LOT 4 ter : la réponse porte un bloc « raccourcis » — éligibles du jour, total
+ * des arriérés, mesures en attente. L'écran d'accueil affiche ces trois chiffres
+ * au-dessus de sa liste ; les calculer ici évite TROIS appels réseau
+ * supplémentaires au premier rendu, sur des téléphones où la connexion est le
+ * facteur limitant. Ils dérivent d'une seule lecture de la situation, partagée
+ * avec /api/seance et /api/mesures via src/services/arrieres.js.
+ *
  * LOT 4 bis : chaque membre porte sa « contribution » — le montant mensuel
  * attendu de lui. Il n'est pas uniforme (5 000 ou 10 000), et l'écran s'en sert
  * pour expliquer un arriéré plutôt que de laisser deviner un barème.
@@ -33,7 +40,15 @@ const express = require('express');
 const { lireToutes } = require('../db');
 const { calculerSoldeReel } = require('./tresorerie');
 const { estRegularisation } = require('./cotisations');
-const { contributionDe } = require('../services/arrieres');
+const {
+  contributionDe,
+  construireSituation,
+  motifInegibilite,
+  classerMesures,
+  mesuresApplicables,
+  dateEffetMesures,
+  aujourdhui,
+} = require('../services/arrieres');
 
 const routeur = express.Router();
 
@@ -175,6 +190,35 @@ routeur.get('/', async (requete, reponse) => {
     );
     const nombreEcartes = Number(comptes[0] ? comptes[0].ecartes : 0) || 0;
 
+    // Raccourcis de l'écran d'accueil : une seule construction de la situation
+    // sert les trois chiffres. Le mois de référence est celui du jour — la
+    // séance se joue aujourd'hui, et les arriérés s'arrêtent au mois courant.
+    const jour = aujourdhui();
+    const moisRaccourcis = jour.slice(0, 7);
+    const situationMembres = await construireSituation(moisRaccourcis, jour);
+    const classement = classerMesures(situationMembres);
+
+    const raccourcis = {
+      // Qui peut fouler le terrain aujourd'hui : même cascade que /api/seance.
+      eligibles_aujourdhui: situationMembres.filter(
+        (membre) => motifInegibilite(membre, moisRaccourcis) === null
+      ).length,
+      // Somme des montants dus au titre des cotisations, pénalités exclues :
+      // même chiffre que le bandeau de l'écran Arriérés.
+      total_arrieres: situationMembres
+        .filter((membre) => membre.nb_mois > 0)
+        .reduce((somme, membre) => somme + membre.montant_du, 0),
+      mesures_en_attente: classement.a_penaliser.length + classement.a_ecarter.length,
+      // Le détail, pour le rappel « 9 à pénaliser · 5 à mettre à l'écart ».
+      mesures_a_penaliser: classement.a_penaliser.length,
+      mesures_a_ecarter: classement.a_ecarter.length,
+      // Faux avant la date d'effet : l'application grise alors le raccourci
+      // plutôt que d'inviter à une action que le serveur refuserait en 409.
+      mesures_applicable: mesuresApplicables(jour),
+      date_effet_mesures: dateEffetMesures(),
+      total_membres_seance: situationMembres.length,
+    };
+
     const situation = await calculerSoldeReel();
     const nombreAJour = membres.filter((membre) => membre.paid).length;
     const moisCourant = new Date().toISOString().slice(0, 7); // format AAAA-MM
@@ -201,9 +245,12 @@ routeur.get('/', async (requete, reponse) => {
     console.log(
       `[stats] tableau public servi : ${synthese.paid}/${synthese.total_members} à jour ` +
         `(${synthese.percentage_paid} %) pour ${moisCourant}, ${montantEncaisse} XAF encaissés, ` +
-        `${situation.solde} XAF en caisse`
+        `${situation.solde} XAF en caisse — raccourcis : ` +
+        `${raccourcis.eligibles_aujourdhui} éligible(s), ` +
+        `${raccourcis.total_arrieres} XAF d'arriérés, ` +
+        `${raccourcis.mesures_en_attente} mesure(s) en attente`
     );
-    return reponse.status(200).json({ summary: synthese, members: membres });
+    return reponse.status(200).json({ summary: synthese, raccourcis, members: membres });
   } catch (erreur) {
     console.error(`[stats] échec de la lecture du tableau : ${erreur.message}`);
     return reponse.status(500).json({ error: 'Impossible de charger le tableau des cotisations' });

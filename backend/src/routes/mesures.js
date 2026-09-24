@@ -42,6 +42,7 @@ const {
   penaliteProposee,
   mesuresApplicables,
   construireSituation,
+  classerMesures,
 } = require('../services/arrieres');
 
 const routeur = express.Router();
@@ -103,12 +104,12 @@ function lireIdentifiants(valeur) {
 async function construireMesures(mois, jour = aujourdhui()) {
   const situation = await construireSituation(mois, jour);
 
-  // Les membres déjà écartés ne sont plus proposés à quoi que ce soit : ils ne
-  // figurent que dans le résumé.
-  const actifs = situation.filter((membre) => membre.statut === 'actif');
+  // Le classement vit dans le service : /api/stats en compte les longueurs pour
+  // le raccourci de l'écran d'accueil, et deux copies de ces filtres auraient
+  // fini par ne plus dire la même chose.
+  const classement = classerMesures(situation);
 
-  const aPenaliser = actifs
-    .filter((membre) => membre.nb_mois > 0 && membre.nb_mois < SEUIL_ECART && !membre.deja_penalise)
+  const aPenaliser = classement.a_penaliser
     .map((membre) => ({
       id: membre.id,
       name: membre.name,
@@ -120,8 +121,7 @@ async function construireMesures(mois, jour = aujourdhui()) {
     }))
     .sort((a, b) => b.mois_de_retard - a.mois_de_retard || a.name.localeCompare(b.name, 'fr'));
 
-  const aEcarter = actifs
-    .filter((membre) => membre.nb_mois >= SEUIL_ECART)
+  const aEcarter = classement.a_ecarter
     .map((membre) => ({
       id: membre.id,
       name: membre.name,
@@ -131,8 +131,7 @@ async function construireMesures(mois, jour = aujourdhui()) {
     }))
     .sort((a, b) => b.mois_de_retard - a.mois_de_retard || a.name.localeCompare(b.name, 'fr'));
 
-  const peuventJouer = actifs
-    .filter((membre) => membre.nb_mois === 0)
+  const peuventJouer = classement.peuvent_jouer
     .map((membre) => ({
       id: membre.id,
       name: membre.name,
@@ -152,12 +151,8 @@ async function construireMesures(mois, jour = aujourdhui()) {
       a_jour: peuventJouer.length,
       a_penaliser: aPenaliser.length,
       a_ecarter: aEcarter.length,
-      ecartes_deja: situation.filter((membre) => membre.statut === 'ecarte').length,
-      // Déjà pénalisés pour CE mois : ils ne sont pas proposés, mais le bureau
-      // doit savoir qu'ils ont été traités, sans quoi la liste paraît trop courte.
-      penalises_deja: actifs.filter(
-        (membre) => membre.deja_penalise && membre.nb_mois > 0 && membre.nb_mois < SEUIL_ECART
-      ).length,
+      ecartes_deja: classement.ecartes_deja,
+      penalises_deja: classement.penalises_deja,
     },
   };
 }

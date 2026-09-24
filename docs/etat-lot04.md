@@ -4,8 +4,8 @@ Deux dépôts modifiés :
 
 | Dépôt | Branche | Contenu |
 | --- | --- | --- |
-| `sante-extremes` (backend Express) | `master` | Date d'adhésion, contribution, statut du membre, `/api/arrieres`, `/api/seance`, `/api/mesures` |
-| `sante-extremes-flutter` (application) | `main` | Écrans Arriérés, Séance, Mesures du mois ; adhésion, contribution et mise à l'écart sur l'écran Membres |
+| `sante-extremes` (backend Express) | `master` | Date d'adhésion, contribution, statut du membre, `/api/arrieres`, `/api/seance`, `/api/mesures`, bloc `raccourcis` de `/api/stats` |
+| `sante-extremes-flutter` (application) | `main` | Écrans Arriérés, Séance, Mesures du mois ; raccourcis sur l'écran État ; adhésion, contribution et mise à l'écart sur l'écran Membres |
 
 Décisions du bureau exécutif traduites en code :
 
@@ -406,9 +406,81 @@ censeur, « Mettre à l'écart » le code secrétaire, chacun avec récapitulati
 
 ---
 
-## F. État des vérifications automatiques
+## F. Raccourcis de l'écran État
 
-Backend — `npm test` : **60 tests, 60 verts, 0 échec** (20 du LOT 3 ter inchangés, 40 dans
+Les trois écrans du lot vivaient dans l'onglet Plus, à deux gestes de l'accueil. Une rangée de trois
+cartes s'intercale désormais **entre le bandeau sombre et le champ de recherche**.
+
+Ce sont des raccourcis, mais ils portent chacun **leur chiffre** : on apprend qu'il y a 670 000
+d'arriérés sans ouvrir l'écran. C'est ce qui les distingue de trois boutons.
+
+| Carte | Icône | Chiffre | Libellé | Destination |
+| --- | --- | --- | --- | --- |
+| Séance | ballon | éligibles du jour | « peuvent jouer » | écran Séance |
+| Arriérés | alerte | total formaté (« 670 000 ») | « XAF dus » | écran Arriérés |
+| Mesures | balance | à pénaliser + à écarter | « mesures à appliquer » | écran Mesures |
+
+**Avant la date d'effet**, la carte Mesures affiche un tiret grisé et « à partir du 6 oct » : rien
+n'est applicable, et un chiffre noir inviterait à une action que le serveur refuserait en 409. Elle
+reste tapable — le bureau veut voir venir. **Après**, une pastille orange signale qu'il y a à
+traiter, et disparaît quand le compte tombe à zéro : une pastille à zéro n'est que du bruit.
+
+Charte : cartes blanches, bord `#E6E3DD`, rayon 16, chiffre Manrope 600 en 18, libellé 11 px gris.
+Hauteur 72 px, **défilement horizontal** — sur 360 px, trois colonnes de 108 px couperaient « peuvent
+jouer » en deux ; mieux vaut laisser la troisième dépasser, elle invite au geste qui la révèle.
+
+Aucun code requis, visibles de tous. **Les entrées de l'onglet Plus restent en place** : les
+raccourcis s'ajoutent à la navigation, ils ne la remplacent pas.
+
+### Un seul appel réseau
+
+Les chiffres viennent d'un bloc `raccourcis` ajouté à `GET /api/stats` :
+
+```json
+{ "raccourcis": { "eligibles_aujourdhui": 21, "total_arrieres": 670000,
+                  "mesures_en_attente": 14, "mesures_a_penaliser": 9,
+                  "mesures_a_ecarter": 5, "mesures_applicable": true,
+                  "date_effet_mesures": "2026-10-06", "total_membres_seance": 38 } }
+```
+
+Trois appels supplémentaires au premier rendu auraient été trois allers-retours de trop sur des
+téléphones où la connexion est le facteur limitant. Le bloc dérive d'**une seule** construction de la
+situation, et l'ancien second appel à `/api/mesures` depuis l'écran État a disparu avec lui.
+
+Pour que les raccourcis ne deviennent pas un second jeu de chiffres, deux fonctions de domaine ont
+été remontées dans `src/services/arrieres.js` :
+
+- `motifInegibilite(membre, mois)` — la cascade d'éligibilité, désormais partagée par `/api/seance`
+  et `/api/stats` ;
+- `classerMesures(situation)` — la répartition à pénaliser / à écarter / à jour, partagée par
+  `/api/mesures` et `/api/stats`.
+
+Les routes n'en gardent que la mise en forme. Un test vérifie explicitement que chaque raccourci
+annonce **le même chiffre que l'écran qu'il ouvre**.
+
+### Vérifications
+
+| Cas | Attendu | Résultat |
+| --- | --- | --- |
+| `/api/stats` | porte le bloc `raccourcis` | OK |
+| 3 membres, 1 à jour / 1 à 1 mois / 1 à 5 mois | 1 éligible, 55 000 dus, 1 + 1 mesure | OK — contributions mixtes comprises |
+| Raccourci vs `/api/seance` | même nombre d'éligibles | OK |
+| Raccourci vs `/api/arrieres` | même total | OK |
+| Raccourci vs `/api/mesures` | mêmes comptes | OK |
+| Membre écarté à jour de sa cotisation | hors des éligibles | OK — 1 sur 2 |
+| Base sans membre | zéros, jamais `null` | OK |
+| Avant la date d'effet | `mesures_applicable: false` | OK |
+| Après | `true` | OK |
+| Carte à 72 px, trois libellés réels | aucun débordement | OK — testé au pixel |
+| Chiffre démesuré (999 999 999) | tronqué, largeur tenue | OK |
+| Carte grisée | chiffre en gris, **toujours tapable** | OK |
+| Pastille orange | absente à zéro, présente sinon | OK |
+
+---
+
+## G. État des vérifications automatiques
+
+Backend — `npm test` : **65 tests, 65 verts, 0 échec** (20 du LOT 3 ter inchangés, 45 dans
 `tests/lot04-arrieres.test.js`). `node --check` passé sur tous les fichiers modifiés :
 `src/db.js`, `src/index.js`, `src/services/arrieres.js`, `src/routes/{admin,arrieres,seance,mesures,
 stats,journal,cotisations,export}.js`.
@@ -422,8 +494,9 @@ Migration éprouvée deux fois sur des bases reconstruites au schéma d'avant le
 
 Application — `flutter analyze` : **0 erreur, 0 avertissement** (111 infos de style, de même nature
 que les 94 d'avant : `prefer_expression_function_bodies` sur les `build`, conformes à l'usage du
-projet). `flutter test` : **36 tests verts** (18 d'avant, 18 dans
-`test/cycle_cotisation_test.dart`). APK release arm64 construit en local.
+projet). `flutter test` : **42 tests verts** — 18 d'avant, 18 dans
+`test/cycle_cotisation_test.dart`, 6 dans `test/carte_raccourci_test.dart`, ces derniers montant la
+carte dans la hauteur exacte que lui impose la rangée. APK release arm64 construit en local.
 
 ---
 
@@ -433,7 +506,8 @@ projet). `flutter test` : **36 tests verts** (18 d'avant, 18 dans
    `members.date_adhesion` ; et le montant dû appliquait 10 000 à tous, au lieu de
    `members.contribution` — 5 000 pour une partie de l'effectif.
 2. Trois routes **publiques en lecture** : `/api/arrieres` (disponible dès le déploiement),
-   `/api/seance` (les censeurs contrôlent au bord du terrain), `/api/mesures`.
+   `/api/seance` (les censeurs contrôlent au bord du terrain), `/api/mesures`. Leurs trois chiffres
+   remontent dans le bloc `raccourcis` de `/api/stats`, affiché en tête de l'écran d'accueil.
 3. **Les mesures ne s'appliquent qu'à partir du 6 octobre 2026** : avant, listes consultables et
    `POST` refusés en 409. Écriture réservée — pénalités au censeur, mises à l'écart au secrétaire.
 4. **Idempotence** sur les deux `POST` : rejouer une liste n'inflige rien deux fois. Le barème et le
