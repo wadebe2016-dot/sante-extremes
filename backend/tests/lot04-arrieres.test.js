@@ -71,11 +71,18 @@ function bloquerLesMesures() {
 // mois près, et un test qui bascule le 1ᵉʳ du mois ne prouve plus rien.
 const MOIS_REFERENCE = '2026-09';
 
-/** Crée un membre avec son mois d'adhésion. */
-function ajouterMembre(id, nom, moisAdhesion, statut = 'actif') {
+/**
+ * Crée un membre avec son mois d'adhésion et sa contribution mensuelle.
+ *
+ * La contribution n'est pas uniforme dans l'association : sans montant
+ * explicite, le barème de base s'applique, comme pour un membre créé par
+ * l'API.
+ */
+function ajouterMembre(id, nom, moisAdhesion, statut = 'actif', contribution = COTISATION_MENSUELLE) {
   return executer(
-    'INSERT INTO members (id, name, date_adhesion, statut, created_at) VALUES (?, ?, ?, ?, ?)',
-    [id, nom, `${moisAdhesion}-01`, statut, `${moisAdhesion}-01T08:00:00Z`]
+    `INSERT INTO members (id, name, date_adhesion, contribution, statut, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [id, nom, `${moisAdhesion}-01`, contribution, statut, `${moisAdhesion}-01T08:00:00Z`]
   );
 }
 
@@ -83,14 +90,18 @@ function ajouterMembre(id, nom, moisAdhesion, statut = 'actif') {
  * Cotisation d'un membre pour un mois donné.
  * @param {string} statut 'validee' ou 'en_attente'
  */
-function cotiser(idMembre, mois, { versement = null, statut = 'validee' } = {}) {
+function cotiser(
+  idMembre,
+  mois,
+  { versement = null, statut = 'validee', montant = COTISATION_MENSUELLE } = {}
+) {
   return executer(
     `INSERT INTO cotisations
        (member_id, montant, moyen, date_paiement, date_versement, statut, date_validation, valide_par)
      VALUES (?, ?, 'Espèce', ?, ?, ?, ?, 'Junior Mbarga')`,
     [
       idMembre,
-      COTISATION_MENSUELLE,
+      montant,
       `${mois}-05T12:00:00Z`,
       versement ? `${versement}T12:00:00Z` : `${mois}-03T12:00:00Z`,
       statut,
@@ -257,6 +268,211 @@ test('une date d’adhésion future est refusée', async () => {
 
   assert.equal(reponse.code, 400);
   assert.match(reponse.corps.error, /futur/);
+});
+
+// ---------------------------------------------------------------------------
+// Contribution mensuelle — elle n'est PAS uniforme
+// ---------------------------------------------------------------------------
+
+test('le montant dû suit la contribution du membre, pas un barème uniforme', async () => {
+  await ajouterMembre(1, 'A Cinq Mille', '2026-07', 'actif', 5000);
+  await ajouterMembre(2, 'A Dix Mille', '2026-07', 'actif', 10000);
+
+  const situation = await construireSituation(MOIS_REFERENCE);
+  const cinq = situation.find((ligne) => ligne.id === 1);
+  const dix = situation.find((ligne) => ligne.id === 2);
+
+  // Même ancienneté, même nombre de mois dus, montants différents.
+  assert.equal(cinq.nb_mois, 3);
+  assert.equal(dix.nb_mois, 3);
+  assert.equal(cinq.contribution, 5000);
+  assert.equal(dix.contribution, 10000);
+  assert.equal(cinq.montant_du, 15000);
+  assert.equal(dix.montant_du, 30000);
+});
+
+test('le total des arriérés additionne des contributions différentes', async () => {
+  await ajouterMembre(1, 'A Cinq Mille', '2026-09', 'actif', 5000);
+  await ajouterMembre(2, 'A Dix Mille', '2026-09', 'actif', 10000);
+
+  const arrieres = await construireArrieres(MOIS_REFERENCE);
+
+  // Un barème uniforme à 10 000 aurait annoncé 20 000.
+  assert.equal(arrieres.resume.total_arrieres, 15000);
+  assert.equal(
+    arrieres.resume.total_arrieres,
+    arrieres.membres.reduce((somme, membre) => somme + membre.montant_du, 0)
+  );
+});
+
+test('la contribution figure sur chaque ligne d’arriéré', async () => {
+  await ajouterMembre(1, 'A Cinq Mille', '2026-09', 'actif', 5000);
+
+  const { corps } = await appeler('/api/arrieres?mois=2026-09');
+  assert.equal(corps.membres[0].contribution, 5000);
+  assert.equal(corps.membres[0].montant_du, 5000);
+});
+
+test('la feuille de séance et les mesures suivent la même contribution', async () => {
+  await ajouterMembre(1, 'A Cinq Mille', '2026-07', 'actif', 5000);
+
+  const seance = await appeler('/api/seance?date=2026-10-03');
+  const ligne = seance.corps.non_eligibles[0];
+  assert.equal(ligne.mois_dus, 4); // juillet à octobre
+  assert.equal(ligne.montant_du, 20000); // 4 × 5 000, pas 4 × 10 000
+
+  const mesures = await construireMesures('2026-10', '2026-10-06');
+  assert.equal(mesures.a_ecarter[0].montant_du, 20000);
+  // La pénalité, elle, est forfaitaire : elle ne dépend pas de la contribution.
+  assert.equal(mesures.a_ecarter.length, 1);
+});
+
+test('la pénalité reste forfaitaire quelle que soit la contribution', async () => {
+  await ajouterMembre(1, 'A Cinq Mille', '2026-10', 'actif', 5000);
+  await ajouterMembre(2, 'A Dix Mille', '2026-10', 'actif', 10000);
+
+  const mesures = await construireMesures('2026-10', '2026-10-06');
+
+  for (const ligne of mesures.a_penaliser) {
+    assert.equal(ligne.penalite_proposee, 1000, `${ligne.name} doit 1 000 de pénalité`);
+  }
+  // Les montants dus, eux, diffèrent.
+  const montants = mesures.a_penaliser.map((ligne) => ligne.montant_du).sort((a, b) => a - b);
+  assert.deepEqual(montants, [5000, 10000]);
+});
+
+test('la migration déduit la contribution du montant le plus fréquent', async () => {
+  await executer(
+    "INSERT INTO members (id, name, created_at) VALUES (1, 'Habituel', '2026-05-01T08:00:00Z')"
+  );
+  // Trois versements à 5 000, un seul à 10 000 : l'attente est à 5 000.
+  await cotiser(1, '2026-05', { montant: 5000 });
+  await cotiser(1, '2026-06', { montant: 5000 });
+  await cotiser(1, '2026-07', { montant: 5000 });
+  await cotiser(1, '2026-08', { montant: 10000 });
+
+  await executer(`UPDATE members SET contribution = COALESCE(
+      (SELECT c.montant FROM cotisations c
+        WHERE c.member_id = members.id AND c.statut = 'validee' AND c.montant > 0
+        GROUP BY c.montant
+        ORDER BY COUNT(*) DESC, MAX(c.date_paiement) DESC
+        LIMIT 1),
+      10000) WHERE id = 1`);
+
+  const membre = await lireUne('SELECT contribution FROM members WHERE id = 1');
+  assert.equal(membre.contribution, 5000);
+});
+
+test('sans cotisation, la migration retient le barème de base', async () => {
+  await executer(
+    "INSERT INTO members (id, name, created_at) VALUES (1, 'Sans Rien', '2026-09-01T08:00:00Z')"
+  );
+
+  await executer(`UPDATE members SET contribution = COALESCE(
+      (SELECT c.montant FROM cotisations c
+        WHERE c.member_id = members.id AND c.statut = 'validee' AND c.montant > 0
+        GROUP BY c.montant
+        ORDER BY COUNT(*) DESC, MAX(c.date_paiement) DESC
+        LIMIT 1),
+      10000) WHERE id = 1`);
+
+  const membre = await lireUne('SELECT contribution FROM members WHERE id = 1');
+  assert.equal(membre.contribution, 10000);
+});
+
+test('POST /api/admin/members accepte une contribution, le barème par défaut sinon', async () => {
+  const avec = await appeler('/api/admin/members', {
+    methode: 'POST',
+    code: '333333',
+    corps: { name: 'A Cinq Mille', date_adhesion: '2026-09', contribution: 5000 },
+  });
+  assert.equal(avec.code, 201);
+  assert.equal(avec.corps.contribution, 5000);
+
+  const sans = await appeler('/api/admin/members', {
+    methode: 'POST',
+    code: '333333',
+    corps: { name: 'Au Bareme' },
+  });
+  assert.equal(sans.code, 201);
+  assert.equal(sans.corps.contribution, COTISATION_MENSUELLE);
+});
+
+test('une contribution nulle ou aberrante est refusée', async () => {
+  for (const montant of [0, -5000, 'beaucoup', 99999999]) {
+    const reponse = await appeler('/api/admin/members', {
+      methode: 'POST',
+      code: '333333',
+      corps: { name: `Essai ${montant}`, contribution: montant },
+    });
+    assert.equal(reponse.code, 400, `contribution « ${montant} » doit être refusée`);
+  }
+});
+
+test('PATCH corrige la contribution, et le montant dû suit immédiatement', async () => {
+  await ajouterMembre(1, 'Mal Renseigne', '2026-07', 'actif', 10000);
+
+  const avant = await construireArrieres(MOIS_REFERENCE);
+  assert.equal(avant.membres[0].montant_du, 30000);
+
+  const correction = await appeler('/api/admin/members/1', {
+    methode: 'PATCH',
+    code: '333333',
+    corps: { contribution: 5000 },
+  });
+  assert.equal(correction.code, 200);
+  assert.equal(correction.corps.contribution, 5000);
+
+  const apres = await construireArrieres(MOIS_REFERENCE);
+  assert.equal(apres.membres[0].montant_du, 15000);
+});
+
+test('PATCH corrige les deux champs d’un coup', async () => {
+  await ajouterMembre(1, 'A Corriger', '2026-01', 'actif', 10000);
+
+  const correction = await appeler('/api/admin/members/1', {
+    methode: 'PATCH',
+    code: '333333',
+    corps: { date_adhesion: '2026-08', contribution: 5000 },
+  });
+
+  assert.equal(correction.code, 200);
+  assert.equal(correction.corps.date_adhesion, '2026-08-01');
+  assert.equal(correction.corps.contribution, 5000);
+
+  const apres = await construireArrieres(MOIS_REFERENCE);
+  assert.equal(apres.membres[0].nb_mois, 2); // août et septembre
+  assert.equal(apres.membres[0].montant_du, 10000); // 2 × 5 000
+});
+
+test('PATCH sans aucun champ est refusé, et une valeur aberrante n’écrit rien', async () => {
+  await ajouterMembre(1, 'Intact', '2026-08', 'actif', 5000);
+
+  const vide = await appeler('/api/admin/members/1', {
+    methode: 'PATCH',
+    code: '333333',
+    corps: {},
+  });
+  assert.equal(vide.code, 400);
+
+  // Adhésion correcte MAIS contribution aberrante : rien ne doit bouger.
+  const mixte = await appeler('/api/admin/members/1', {
+    methode: 'PATCH',
+    code: '333333',
+    corps: { date_adhesion: '2026-05', contribution: 0 },
+  });
+  assert.equal(mixte.code, 400);
+
+  const membre = await lireUne('SELECT date_adhesion, contribution FROM members WHERE id = 1');
+  assert.equal(membre.date_adhesion, '2026-08-01');
+  assert.equal(membre.contribution, 5000);
+});
+
+test('/api/stats porte la contribution de chaque membre', async () => {
+  await ajouterMembre(1, 'A Cinq Mille', '2026-09', 'actif', 5000);
+
+  const stats = await appeler('/api/stats');
+  assert.equal(stats.corps.members[0].contribution, 5000);
 });
 
 // ---------------------------------------------------------------------------

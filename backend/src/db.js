@@ -110,6 +110,31 @@ const COLONNES_AJOUTEES = {
                 substr(created_at, 1, 7) || '-01'
               )`,
     },
+    // LOT 4 bis — contribution mensuelle attendue, propre à chaque membre.
+    //
+    // La cotisation n'a jamais été uniforme : certains membres sont à 5 000,
+    // d'autres à 10 000. Le calcul appliquait 10 000 à tous et surestimait les
+    // arriérés de la moitié de l'effectif.
+    {
+      nom: 'contribution',
+      definition: 'REAL NOT NULL DEFAULT 10000',
+      // Remplissage UNIQUE, au moment même de l'ajout de la colonne. Ce qu'un
+      // membre verse d'habitude est la meilleure preuve de ce qu'on attend de
+      // lui : on retient le montant le PLUS FRÉQUENT parmi ses cotisations
+      // validées. À égalité de fréquence, le plus récemment versé l'emporte —
+      // c'est l'attente en vigueur, pas celle d'il y a deux ans. Sans aucune
+      // cotisation, la valeur par défaut s'applique.
+      apres: `UPDATE members SET contribution = COALESCE(
+                (SELECT c.montant
+                   FROM cotisations c
+                  WHERE c.member_id = members.id
+                    AND c.statut = 'validee'
+                    AND c.montant > 0
+                  GROUP BY c.montant
+                  ORDER BY COUNT(*) DESC, MAX(c.date_paiement) DESC
+                  LIMIT 1),
+                10000)`,
+    },
     // LOT 4 — « mis à l'écart », jamais « radié ». Le CHECK vit dans
     // schema.sql, pour les bases neuves : SQLite ne sait pas ajouter une
     // contrainte à une table existante, et la liste fermée est tenue par

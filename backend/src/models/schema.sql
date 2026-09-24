@@ -15,6 +15,11 @@ CREATE TABLE IF NOT EXISTS members (
   name          TEXT NOT NULL UNIQUE,
   -- LOT 4 : voir le bloc « Date d'adhésion, statut du membre » en fin de fichier.
   date_adhesion DATE,
+  -- LOT 4 bis : la cotisation mensuelle n'est PAS uniforme. Certains membres
+  -- sont à 5 000, d'autres à 10 000 (colonne « Contribution attendue » de la
+  -- feuille d'origine). Appliquer 10 000 à tout le monde surestimait les
+  -- arriérés de ceux qui doivent la moitié.
+  contribution  REAL NOT NULL DEFAULT 10000 CHECK (contribution > 0),
   statut        TEXT NOT NULL DEFAULT 'actif' CHECK (statut IN ('actif', 'ecarte')),
   date_statut   DATETIME,
   motif_statut  TEXT,
@@ -208,6 +213,10 @@ CREATE TABLE IF NOT EXISTS parametres (
 -- existantes : un CREATE TABLE IF NOT EXISTS n'ajoute rien à une table déjà
 -- présente. Elles figurent ici pour qu'une base neuve naisse complète.
 --
+--   contribution   montant mensuel attendu de CE membre, en francs CFA. Tous
+--                  les calculs de montant dû s'en servent — arriérés, mesures,
+--                  feuille de séance, exports. À la migration, il est déduit du
+--                  montant le plus fréquent parmi ses cotisations validées.
 --   date_adhesion  mois d'entrée dans l'association, au 1ᵉʳ du mois. C'est le
 --                  point de départ de TOUT calcul d'arriéré : un membre entré
 --                  en mai ne doit rien pour janvier. À la migration, elle est

@@ -4,13 +4,15 @@ Deux dépôts modifiés :
 
 | Dépôt | Branche | Contenu |
 | --- | --- | --- |
-| `sante-extremes` (backend Express) | `master` | Date d'adhésion, statut du membre, `/api/arrieres`, `/api/seance`, `/api/mesures` |
-| `sante-extremes-flutter` (application) | `main` | Écrans Arriérés, Séance, Mesures du mois ; adhésion et mise à l'écart sur l'écran Membres |
+| `sante-extremes` (backend Express) | `master` | Date d'adhésion, contribution, statut du membre, `/api/arrieres`, `/api/seance`, `/api/mesures` |
+| `sante-extremes-flutter` (application) | `main` | Écrans Arriérés, Séance, Mesures du mois ; adhésion, contribution et mise à l'écart sur l'écran Membres |
 
 Décisions du bureau exécutif traduites en code :
 
 - la cotisation du mois M se verse **entre le 25 de M-1 et le 5 de M** ; au-delà du 5, le membre est
   en retard ;
+- **la cotisation n'est pas uniforme** : certains membres sont à 5 000, d'autres à 10 000 (colonne
+  « Contribution attendue » de la feuille d'origine) ;
 - **plus de crédit** : pour fouler le terrain, la cotisation du mois doit être versée **et validée**
   avant le coup d'envoi ;
 - 1 mois de retard → **1 000** ; 2 mois → **2 000** ; 3 mois ou plus → **mise à l'écart**, sans
@@ -80,6 +82,90 @@ immédiatement.
 
 ---
 
+## A bis. Contribution mensuelle
+
+Second défaut de surestimation, de même nature que le premier : le calcul appliquait **10 000 à tout
+le monde**. Les membres à 5 000 se voyaient réclamer le double de ce qu'ils devaient.
+
+### Migration
+
+Additive, comme le reste (`src/db.js` ▸ `COLONNES_AJOUTEES.members`) :
+
+```
+members(… , contribution REAL NOT NULL DEFAULT 10000)
+```
+
+Remplissage **une seule fois**, au moment de l'ajout de la colonne :
+
+```sql
+UPDATE members SET contribution = COALESCE(
+  (SELECT c.montant FROM cotisations c
+    WHERE c.member_id = members.id AND c.statut = 'validee' AND c.montant > 0
+    GROUP BY c.montant
+    ORDER BY COUNT(*) DESC, MAX(c.date_paiement) DESC
+    LIMIT 1),
+  10000)
+```
+
+Ce qu'un membre verse d'habitude est la meilleure preuve de ce qu'on attend de lui : on retient le
+montant **le plus fréquent** parmi ses cotisations validées. À égalité de fréquence, le **plus
+récemment versé** l'emporte — c'est l'attente en vigueur, pas celle d'il y a deux ans. Sans aucune
+cotisation, le barème de base s'applique.
+
+Le `CHECK (contribution > 0)` vit dans `schema.sql` pour les bases neuves ; sur une base existante,
+`lireContribution` dans `src/routes/admin.js` refuse en 400 tout montant nul, négatif ou supérieur à
+1 000 000. Même dispositif que pour `statut`, et pour la même raison : SQLite ne sait pas ajouter une
+contrainte à une table déjà là.
+
+### Portée
+
+**Tous** les calculs de montant dû passent par `members.contribution` — `construireSituation` dans
+`src/services/arrieres.js` la lit une fois, et `/api/arrieres`, `/api/seance`, `/api/mesures` et la
+feuille Excel en héritent. `COTISATION_MENSUELLE` n'est plus qu'un repli : contribution d'un membre
+créé sans montant, et valeur de secours si la colonne est vide.
+
+La **pénalité reste forfaitaire** — 1 000 pour un mois, 2 000 pour deux — quelle que soit la
+contribution. Le bureau sanctionne le retard, pas le montant.
+
+| Route | Rôle | Effet |
+| --- | --- | --- |
+| `POST /api/admin/members` | secrétaire | `contribution` facultative, barème de base par défaut |
+| `PATCH /api/admin/members/:id` | secrétaire | corrige `date_adhesion` **et/ou** `contribution` |
+| `GET /api/admin/members`, `/api/stats`, `/api/arrieres` | public/secrétaire | exposent `contribution` |
+
+Le `PATCH` valide **les deux champs avant la moindre écriture** : une requête portant une adhésion
+correcte et une contribution aberrante ne modifie rien du tout, plutôt que la moitié.
+
+Application : l'écran Membres affiche « 5 000/mois · adhésion mai 2026 » sous chaque nom et propose
+la correction dans la feuille du membre ; le montant se choisit aussi à la création. L'écran Arriérés
+affiche « 5 000/mois » sous le nom — deux membres à trois mois de retard doivent 15 000 et 30 000, et
+sans ce rappel l'écart paraîtrait être une erreur. Le dialogue de saisie propose les deux montants en
+vigueur d'emblée, le champ libre servant aux exceptions.
+
+### Vérifications
+
+| Cas | Attendu | Résultat |
+| --- | --- | --- |
+| Deux membres, 3 mois dus, 5 000 et 10 000 | 15 000 et 30 000 | OK — un barème uniforme annonçait 30 000 pour les deux |
+| Total des arriérés sur contributions mixtes | somme réelle | OK — 15 000, et non 20 000 |
+| Migration : 4 versements dont 3 à 5 000 | contribution 5 000 | OK |
+| Migration : toujours 5 000 / toujours 10 000 | 5 000 / 10 000 | OK |
+| Migration : aucune cotisation | barème de base | OK — 10 000 |
+| Feuille de séance, membre à 5 000, 4 mois dus | `montant_du` 20 000 | OK |
+| Mesures, membre à 5 000 et membre à 10 000 | pénalité **1 000 pour les deux** | OK — forfaitaire |
+| Mesures, montants dus | 5 000 et 10 000 | OK |
+| `POST` avec `contribution: 5000` | acceptée | OK |
+| `POST` sans contribution | barème de base | OK |
+| `POST` avec 0, négatif, texte, 99 999 999 | refus 400 | OK sur les quatre |
+| `PATCH` contribution 10 000 → 5 000 | montant dû 30 000 → 15 000 | OK — immédiat |
+| `PATCH` des deux champs d'un coup | adhésion **et** contribution corrigées | OK |
+| `PATCH` vide | refus 400 | OK |
+| `PATCH` adhésion valide + contribution nulle | refus 400, **rien n'est écrit** | OK — fiche intacte |
+| `/api/stats` | porte la contribution de chaque membre | OK |
+| Feuille Excel « Arriérés » | colonne « Contribution » | OK |
+
+---
+
 ## B. Statut du membre
 
 `POST /api/admin/members/:id/statut` (secrétaire ou admin) bascule entre `actif` et `ecarte`. Le
@@ -138,18 +224,23 @@ liste est triée par nombre de mois dus décroissant, l'ordre alphabétique dép
              "par_anciennete":{ "1_mois":8, "2_mois":4, "3_mois_et_plus":2 } } }
 ```
 
+Chaque ligne porte la `contribution` du membre : le montant dû est `nb_mois × contribution`, et non
+un barème uniforme.
+
 `total_arrieres` ne compte **que** les cotisations : les pénalités restent une comptabilité
 distincte, annoncées à part dans `penalites_dues` et `total_du`. Les mêmes chiffres alimentent la
 feuille « Arriérés » du classeur Excel — elle appelle la fonction de la route, elle ne refait pas le
 calcul.
 
-Le montant mensuel (10 000 XAF) vit dans `src/services/arrieres.js`, surchargeable par
-`COTISATION_MENSUELLE` si l'assemblée en décide autrement. **Rien à poser en production.**
+Le barème de base (10 000 XAF) vit dans `src/services/arrieres.js`, surchargeable par
+`COTISATION_MENSUELLE`. Il ne s'applique qu'aux membres sans contribution propre : voir la section
+A bis. **Rien à poser en production.**
 
 Application — écran « Arriérés » (onglet Plus, lecture publique) : bandeau avec le total et la
 répartition 1 / 2 / 3 mois et plus ; liste par membre avec les mois dus en puces, le montant dû, la
-**date d'adhésion en petit** — c'est elle qui explique pourquoi l'un doit trois mois et l'autre
-huit — et la date du dernier versement ; filtres d'ancienneté ; « Partager » (texte brut, collé dans
+**contribution et la date d'adhésion en petit** (« 5 000/mois · adhésion mai 2026 ») — ce sont elles
+qui expliquent pourquoi l'un doit 15 000 et l'autre 80 000 — et la date du dernier versement ;
+filtres d'ancienneté ; « Partager » (texte brut, collé dans
 le groupe) et « Exporter » (Excel, feuille « Arriérés »).
 
 ### Vérifications
@@ -317,25 +408,30 @@ censeur, « Mettre à l'écart » le code secrétaire, chacun avec récapitulati
 
 ## F. État des vérifications automatiques
 
-Backend — `npm test` : **47 tests, 47 verts, 0 échec** (20 du LOT 3 ter inchangés, 27 nouveaux dans
+Backend — `npm test` : **60 tests, 60 verts, 0 échec** (20 du LOT 3 ter inchangés, 40 dans
 `tests/lot04-arrieres.test.js`). `node --check` passé sur tous les fichiers modifiés :
 `src/db.js`, `src/index.js`, `src/services/arrieres.js`, `src/routes/{admin,arrieres,seance,mesures,
 stats,journal,cotisations,export}.js`.
 
-Migration éprouvée sur une base reconstruite au schéma d'avant le lot : 6 colonnes ajoutées,
-3 lignes initialisées, 3 cotisations et 1 sanction préservées, second passage sans effet.
+Migration éprouvée deux fois sur des bases reconstruites au schéma d'avant le lot :
+
+- base simple : 7 colonnes ajoutées, adhésions et contributions initialisées, cotisations et
+  sanctions préservées, second passage sans effet ;
+- base à montants mixtes : contributions déduites correctement — toujours 5 000 → 5 000, toujours
+  10 000 → 10 000, majorité 5 000 (3 contre 1) → 5 000, aucune cotisation → barème de base.
 
 Application — `flutter analyze` : **0 erreur, 0 avertissement** (111 infos de style, de même nature
 que les 94 d'avant : `prefer_expression_function_bodies` sur les `build`, conformes à l'usage du
-projet). `flutter test` : **32 tests verts** (18 d'avant, 14 nouveaux dans
+projet). `flutter test` : **36 tests verts** (18 d'avant, 18 dans
 `test/cycle_cotisation_test.dart`). APK release arm64 construit en local.
 
 ---
 
 ## Résumé pour l'architecte
 
-1. **Tout calcul d'arriéré part de `members.date_adhesion`**, jamais de janvier : un membre entré en
-   mai devait huit mois, il en doit trois.
+1. **Deux surestimations corrigées.** Les arriérés partaient de janvier et non de
+   `members.date_adhesion` ; et le montant dû appliquait 10 000 à tous, au lieu de
+   `members.contribution` — 5 000 pour une partie de l'effectif.
 2. Trois routes **publiques en lecture** : `/api/arrieres` (disponible dès le déploiement),
    `/api/seance` (les censeurs contrôlent au bord du terrain), `/api/mesures`.
 3. **Les mesures ne s'appliquent qu'à partir du 6 octobre 2026** : avant, listes consultables et
@@ -344,14 +440,19 @@ projet). `flutter test` : **32 tests verts** (18 d'avant, 14 nouveaux dans
    seuil sont recalculés côté serveur, jamais repris du client.
 5. **« Mis à l'écart », jamais « radié »** : le membre sort des séances et du total « à jour », il
    reste dans l'historique, les exports et le journal. Réversible.
-6. Migration **strictement additive** : 4 colonnes sur `members`, 2 sur `sanctions`, 1 table
-   `evenements_membres`. Remplissage unique des lignes existantes, rejouable sans effet.
+6. Migration **strictement additive** : 5 colonnes sur `members` (dont `contribution`, déduite du
+   montant le plus fréquent de chaque membre), 2 sur `sanctions`, 1 table `evenements_membres`.
+   Remplissage unique des lignes existantes, rejouable sans effet.
 7. Une correction hors périmètre, imposée par la fenêtre : `POST /api/cotisations` accepte le mois
    suivant **pendant** la fenêtre du 25 au 5. Sans elle, verser à l'heure était impossible.
 8. Déploiement :
    `cd ~/sante-extremes/backend && git pull && npm install && npm run migrate && sudo systemctl restart sde-api`
-9. **Aucune variable d'environnement à changer.** `COTISATION_MENSUELLE` (défaut 10 000) et
-   `DATE_EFFET_MESURES` (défaut 2026-10-06) existent mais ne doivent pas être posées.
-10. Test après déploiement : `curl -s https://sde-api.atlastech.cm/api/arrieres | head -c 300`, puis
-    `/api/seance` et `/api/mesures` — les trois doivent répondre **200 sans code**, et `/api/mesures`
-    annoncer `"applicable": false` jusqu'au 6 octobre.
+9. **Aucune variable d'environnement à changer.** `COTISATION_MENSUELLE` (défaut 10 000, simple
+   repli depuis que chaque membre porte la sienne) et `DATE_EFFET_MESURES` (défaut 2026-10-06)
+   existent mais ne doivent pas être posées.
+10. Test après déploiement : `curl -s https://sde-api.atlastech.cm/api/arrieres | head -c 400` —
+    chaque membre doit porter sa `contribution` (5 000 ou 10 000) et un `montant_du` qui en est le
+    multiple. Puis `/api/seance` et `/api/mesures` : les trois répondent **200 sans code**, et
+    `/api/mesures` annonce `"applicable": false` jusqu'au 6 octobre. **Vérifier la liste des
+    contributions déduites** (écran Membres) avant la première application de mesures : la migration
+    devine, le secrétariat tranche.

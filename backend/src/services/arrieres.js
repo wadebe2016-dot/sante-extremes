@@ -31,14 +31,34 @@
 const { lireToutes } = require('../db');
 
 /**
- * Montant d'une cotisation mensuelle, en francs CFA.
+ * Contribution mensuelle PAR DÉFAUT, en francs CFA.
  *
- * Ce n'est pas un secret mais un réglage : la variable d'environnement permet
- * de le corriger sans reprendre le code si l'assemblée en décide autrement.
- * Tant qu'elle est absente, la valeur en vigueur s'applique.
+ * Ce n'est qu'un repli : le montant attendu est propre à chaque membre et vit
+ * dans « members.contribution ». La cotisation n'a jamais été uniforme —
+ * certains membres sont à 5 000, d'autres à 10 000 — et appliquer un montant
+ * unique surestimait les arriérés de la moitié de l'effectif.
+ *
+ * Cette valeur ne sert donc qu'à deux choses : la contribution d'un membre créé
+ * sans montant explicite, et le repli sur une fiche dont la colonne serait
+ * vide. La variable d'environnement permet de la corriger sans reprendre le
+ * code si l'assemblée change le barème de base.
  */
 const COTISATION_MENSUELLE =
   Number(process.env.COTISATION_MENSUELLE) > 0 ? Number(process.env.COTISATION_MENSUELLE) : 10000;
+
+/** Plafond de saisie d'une contribution : au-delà, c'est une faute de frappe. */
+const CONTRIBUTION_MAX = 1000000;
+
+/**
+ * Contribution mensuelle attendue d'un membre.
+ *
+ * Repli sur la valeur par défaut si la colonne est absente, nulle ou aberrante :
+ * une fiche mal renseignée ne doit pas faire disparaître ses arriérés.
+ */
+function contributionDe(membre) {
+  const montant = Number(membre && membre.contribution);
+  return Number.isFinite(montant) && montant > 0 ? montant : COTISATION_MENSUELLE;
+}
 
 /** Barème des pénalités de retard, par nombre de mois dus. */
 const PENALITES = Object.freeze({ 1: 1000, 2: 2000 });
@@ -253,7 +273,7 @@ function statutMembre(membre) {
  */
 async function construireSituation(mois, jour = aujourdhui()) {
   const membres = await lireToutes(
-    `SELECT id, name, date_adhesion, statut, created_at
+    `SELECT id, name, date_adhesion, contribution, statut, created_at
        FROM members
       ORDER BY name COLLATE NOCASE ASC`
   );
@@ -366,7 +386,9 @@ async function construireSituation(mois, jour = aujourdhui()) {
 
     const cotisationDuMois = payes.get(mois) || null;
     const penalitesDues = Math.round(sanction.penalite_due);
-    const montantDu = moisDus.length * COTISATION_MENSUELLE;
+    // Le montant attendu est celui de CE membre, pas un barème uniforme.
+    const contribution = contributionDe(membre);
+    const montantDu = moisDus.length * contribution;
 
     return {
       id: membre.id,
@@ -374,6 +396,7 @@ async function construireSituation(mois, jour = aujourdhui()) {
       statut: statutMembre(membre),
       adhesion,
       date_adhesion: membre.date_adhesion || null,
+      contribution,
       pas_encore_adherent: pasEncoreAdherent,
       mois_dus: moisDus,
       nb_mois: moisDus.length,
@@ -398,6 +421,8 @@ async function construireSituation(mois, jour = aujourdhui()) {
 
 module.exports = {
   COTISATION_MENSUELLE,
+  CONTRIBUTION_MAX,
+  contributionDe,
   PENALITES,
   SEUIL_ECART,
   JOUR_OUVERTURE,

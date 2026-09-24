@@ -15,6 +15,11 @@
  *      pour être lue à voix haute : y mettre vingt-et-une lignes vides la
  *      rendrait inutilisable.
  *
+ * LE MONTANT ATTENDU N'EST PAS UNIFORME : il est propre à chaque membre
+ * (« members.contribution »), 5 000 pour les uns, 10 000 pour les autres. Un
+ * barème unique surestimait les arriérés de la moitié de l'effectif — c'est le
+ * second défaut corrigé par ce lot.
+ *
  * Les membres mis à l'écart restent dans la liste s'ils doivent quelque chose :
  * une mise à l'écart interdit de jouer, elle n'efface pas la dette. Leur statut
  * les distingue, et l'application les grise.
@@ -53,6 +58,9 @@ async function construireArrieres(mois) {
       id: membre.id,
       name: membre.name,
       adhesion: membre.adhesion,
+      // Le montant attendu de CE membre : 5 000 pour les uns, 10 000 pour les
+      // autres. Sans lui, un arriéré de 15 000 reste inexplicable à la lecture.
+      contribution: membre.contribution,
       mois_dus: membre.mois_dus,
       nb_mois: membre.nb_mois,
       montant_du: membre.montant_du,
@@ -81,7 +89,14 @@ async function construireArrieres(mois) {
     ecartes: situation.filter((membre) => membre.statut === 'ecarte').length,
   };
 
-  return { mois, cotisation_mensuelle: COTISATION_MENSUELLE, membres: enRetard, resume };
+  // « cotisation_mensuelle » n'est plus qu'une valeur de repli : le montant
+  // attendu est propre à chaque membre et figure sur sa ligne.
+  return {
+    mois,
+    cotisation_mensuelle: COTISATION_MENSUELLE,
+    membres: enRetard,
+    resume,
+  };
 }
 
 /** GET /api/arrieres — mois dus et montants, par membre. */

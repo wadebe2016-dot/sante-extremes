@@ -11,7 +11,8 @@
  * Le tableau des cotisations range les montants sur le MOIS DÛ — il ne change
  * pas. Le classeur Excel porte en plus une feuille « Versements » : la même
  * population, vue par date de remise de l'argent, régularisations signalées,
- * et depuis le LOT 4 une feuille « Arriérés » : qui doit quoi, et depuis quand.
+ * et depuis le LOT 4 une feuille « Arriérés » : qui doit quoi, et depuis quand,
+ * avec la contribution mensuelle attendue de chacun — elle n'est pas uniforme.
  *
  * Les fiches santé n'apparaissent dans aucun export : ce sont des données de
  * santé, elles ne sortent jamais de l'écran du secrétariat.
@@ -325,6 +326,10 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
     feuilleArrieres.columns = [
       { header: 'Membre', key: 'membre', width: 28 },
       { header: 'Adhésion', key: 'adhesion', width: 14 },
+      // La contribution attendue explique le montant dû : sans elle, deux
+      // membres à trois mois de retard affichent 15 000 et 30 000 sans raison
+      // apparente.
+      { header: 'Contribution', key: 'contribution', width: 14 },
       { header: 'Mois dus', key: 'nb_mois', width: 11 },
       { header: 'Détail des mois', key: 'detail', width: 38 },
       { header: 'Montant dû', key: 'montant', width: 14 },
@@ -345,6 +350,7 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
       feuilleArrieres.addRow([
         membre.name,
         formaterMoisDu(`${membre.adhesion}-01`),
+        membre.contribution,
         membre.nb_mois,
         membre.mois_dus.map((mois) => formaterMoisDu(`${mois}-01`)).join(', '),
         membre.montant_du,
@@ -364,6 +370,7 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
       '',
       '',
       '',
+      '',
       arrieres.resume.total_arrieres,
       arrieres.resume.total_penalites,
       arrieres.resume.total_arrieres + arrieres.resume.total_penalites,
@@ -375,17 +382,19 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
       cellule.border = { top: { style: 'thin', color: { argb: 'FF1C1B1A' } } };
     });
 
-    for (const colonne of [5, 6, 7]) {
+    // Contribution (C), montant dû (F), pénalités (G) et total (H).
+    for (const colonne of [3, 6, 7, 8]) {
       feuilleArrieres.getColumn(colonne).numFmt = '# ##0';
       feuilleArrieres.getColumn(colonne).alignment = { horizontal: 'right' };
     }
-    feuilleArrieres.getColumn(3).alignment = { horizontal: 'center' };
+    feuilleArrieres.getColumn(4).alignment = { horizontal: 'center' };
 
     // Pied de feuille : l'arrêté et sa répartition, pour qu'une page imprimée
     // se suffise à elle-même.
     feuilleArrieres.addRow([]);
     const ligneArrete = feuilleArrieres.addRow([
       `Arrêté au mois de ${moisAnneeEnLettres(moisCible)}`,
+      '',
       '',
       '',
       `${arrieres.resume.membres_a_jour} à jour · ${arrieres.resume.membres_en_retard} en retard`,
@@ -400,6 +409,7 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
     const repartition = arrieres.resume.par_anciennete;
     const ligneRepartition = feuilleArrieres.addRow([
       'Répartition',
+      '',
       '',
       '',
       `1 mois : ${repartition['1_mois']} · 2 mois : ${repartition['2_mois']} · ` +

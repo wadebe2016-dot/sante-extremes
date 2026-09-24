@@ -2,7 +2,7 @@
  * Gestion des membres — Santé des extrêmes.
  *   GET    /api/admin/members         liste des membres (nom, adhésion, statut)
  *   POST   /api/admin/members         création d'un membre
- *   PATCH  /api/admin/members/:id     correction de la date d'adhésion
+ *   PATCH  /api/admin/members/:id     correction de l'adhésion / de la contribution
  *   POST   /api/admin/members/:id/statut  mise à l'écart ou réintégration
  *   DELETE /api/admin/members/:id     suppression d'un membre
  *
@@ -15,6 +15,10 @@
  *                  part. Un membre entré en mai ne doit rien pour janvier : le
  *                  corriger ici recalcule aussitôt ses arriérés, ses mesures et
  *                  son éligibilité aux séances.
+ *   contribution   montant mensuel attendu de CE membre. La cotisation n'est
+ *                  PAS uniforme : 5 000 pour les uns, 10 000 pour les autres.
+ *                  Tous les calculs de montant dû s'en servent, et un barème
+ *                  unique surestimait les arriérés de la moitié de l'effectif.
  *   statut         « actif » ou « ecarte ». MIS À L'ÉCART, JAMAIS RADIÉ : le
  *                  membre reste en base, dans l'historique et dans les exports.
  *                  Il disparaît seulement des éligibles d'une séance et du
@@ -28,7 +32,13 @@
 const express = require('express');
 const { executer, lireUne, lireToutes } = require('../db');
 const { exigerRole } = require('../middleware/auth');
-const { moisCourant, moisValide } = require('../services/arrieres');
+const {
+  moisCourant,
+  moisValide,
+  contributionDe,
+  COTISATION_MENSUELLE,
+  CONTRIBUTION_MAX,
+} = require('../services/arrieres');
 
 const routeur = express.Router();
 
@@ -66,6 +76,30 @@ function convertirAdhesion(valeur) {
   return { date: `${mois}-01` };
 }
 
+/**
+ * Valide une contribution mensuelle reçue.
+ *
+ * Le montant n'est pas uniforme dans l'association : 5 000 pour les uns,
+ * 10 000 pour les autres. Il est donc saisi, et doit être contrôlé — un zéro
+ * ferait disparaître les arriérés du membre, un montant aberrant les ferait
+ * exploser.
+ *
+ * @returns {{montant: number}|{erreur: string}}
+ */
+function lireContribution(valeur) {
+  const montant = Number.parseFloat(valeur);
+
+  if (!Number.isFinite(montant) || montant <= 0) {
+    return { erreur: 'La contribution mensuelle doit être un nombre strictement positif' };
+  }
+
+  if (montant > CONTRIBUTION_MAX) {
+    return { erreur: `La contribution mensuelle ne peut dépasser ${CONTRIBUTION_MAX}` };
+  }
+
+  return { montant };
+}
+
 /** Met en forme une ligne de « members » pour l'API. */
 function formaterMembre(ligne) {
   return {
@@ -74,6 +108,9 @@ function formaterMembre(ligne) {
     // Le repli sur le mois de création évite qu'une fiche antérieure au LOT 4,
     // dont la migration n'aurait rien trouvé, n'apparaisse sans adhésion.
     date_adhesion: ligne.date_adhesion || `${String(ligne.created_at || '').slice(0, 7)}-01`,
+    // Repli sur la valeur par défaut plutôt que null : l'application affiche un
+    // montant, elle n'a pas à deviner lequel.
+    contribution: contributionDe(ligne),
     statut: ligne.statut === 'ecarte' ? 'ecarte' : 'actif',
     date_statut: ligne.date_statut || null,
     motif_statut: ligne.motif_statut || null,
@@ -85,7 +122,7 @@ function formaterMembre(ligne) {
 routeur.get('/members', async (requete, reponse) => {
   try {
     const lignes = await lireToutes(
-      `SELECT id, name, date_adhesion, statut, date_statut, motif_statut, created_at
+      `SELECT id, name, date_adhesion, contribution, statut, date_statut, motif_statut, created_at
          FROM members
         ORDER BY name COLLATE NOCASE ASC`
     );
@@ -105,7 +142,8 @@ routeur.get('/members', async (requete, reponse) => {
 
 /**
  * POST /api/admin/members — création d'un membre
- * @body name, date_adhesion (facultative, mois en cours par défaut)
+ * @body name, date_adhesion (facultative, mois en cours par défaut),
+ *       contribution (facultative, barème de base par défaut)
  */
 routeur.post('/members', async (requete, reponse) => {
   const nom = typeof requete.body?.name === 'string' ? requete.body.name.trim() : '';
@@ -133,18 +171,34 @@ routeur.post('/members', async (requete, reponse) => {
     adhesion = conversion.date;
   }
 
+  // Sans montant explicite, le barème de base s'applique. C'est le cas le plus
+  // fréquent, et le secrétariat corrige d'un geste les membres à 5 000.
+  let contribution = COTISATION_MENSUELLE;
+  const montantDemande = requete.body?.contribution;
+  if (montantDemande !== undefined && montantDemande !== null && String(montantDemande).trim() !== '') {
+    const lecture = lireContribution(montantDemande);
+    if (lecture.erreur) {
+      console.warn(`[admin] création refusée : ${lecture.erreur}`);
+      return reponse.status(400).json({ error: lecture.erreur });
+    }
+    contribution = lecture.montant;
+  }
+
   try {
     const resultat = await executer(
-      "INSERT INTO members (name, date_adhesion, statut) VALUES (?, ?, 'actif')",
-      [nom, adhesion]
+      "INSERT INTO members (name, date_adhesion, contribution, statut) VALUES (?, ?, ?, 'actif')",
+      [nom, adhesion, contribution]
     );
     const ligne = await lireUne(
-      `SELECT id, name, date_adhesion, statut, date_statut, motif_statut, created_at
+      `SELECT id, name, date_adhesion, contribution, statut, date_statut, motif_statut, created_at
          FROM members WHERE id = ?`,
       [resultat.id]
     );
 
-    console.log(`[admin] membre créé : #${ligne.id} ${ligne.name} — adhésion ${adhesion.slice(0, 7)}`);
+    console.log(
+      `[admin] membre créé : #${ligne.id} ${ligne.name} — adhésion ${adhesion.slice(0, 7)}, ` +
+        `contribution ${contribution}`
+    );
     return reponse.status(201).json(formaterMembre(ligne));
   } catch (erreur) {
     if (String(erreur.message).includes('UNIQUE')) {
@@ -157,12 +211,16 @@ routeur.post('/members', async (requete, reponse) => {
 });
 
 /**
- * PATCH /api/admin/members/:id — correction de la date d'adhésion.
- * @body date_adhesion (AAAA-MM)
+ * PATCH /api/admin/members/:id — correction de l'adhésion et de la contribution.
+ * @body date_adhesion (AAAA-MM) et/ou contribution (nombre), au moins l'un des deux
  *
- * C'est la correction qui compte le plus du LOT 4 : une adhésion mal renseignée
- * fabrique des arriérés imaginaires. La modifier ici les efface aussitôt —
- * aucun recalcul différé, les arriérés se déduisent à chaque lecture.
+ * Ce sont les deux corrections qui comptent le plus, et pour la même raison :
+ * l'une comme l'autre fabriquent des arriérés faux quand elles sont mal
+ * renseignées. Une adhésion trop ancienne invente des mois dus ; une
+ * contribution à 10 000 sur un membre qui en doit 5 000 double son ardoise.
+ *
+ * Aucun recalcul différé : les arriérés se déduisent à chaque lecture, corriger
+ * ici les corrige partout dans la seconde.
  */
 routeur.patch('/members/:id', async (requete, reponse) => {
   const identifiant = Number.parseInt(requete.params.id, 10);
@@ -171,40 +229,73 @@ routeur.patch('/members/:id', async (requete, reponse) => {
     return reponse.status(400).json({ error: 'Identifiant de membre invalide' });
   }
 
-  const demandee = requete.body?.date_adhesion;
-  if (demandee === undefined || demandee === null || String(demandee).trim() === '') {
-    return reponse.status(400).json({ error: 'La date d’adhésion est obligatoire' });
+  const adhesionDemandee = requete.body?.date_adhesion;
+  const contributionDemandee = requete.body?.contribution;
+
+  const veutAdhesion =
+    adhesionDemandee !== undefined && adhesionDemandee !== null &&
+    String(adhesionDemandee).trim() !== '';
+  const veutContribution =
+    contributionDemandee !== undefined && contributionDemandee !== null &&
+    String(contributionDemandee).trim() !== '';
+
+  if (!veutAdhesion && !veutContribution) {
+    return reponse
+      .status(400)
+      .json({ error: 'Indiquez la date d’adhésion ou la contribution mensuelle' });
   }
 
-  const conversion = convertirAdhesion(demandee);
-  if (conversion.erreur) {
-    console.warn(`[admin] correction refusée : ${conversion.erreur}`);
-    return reponse.status(400).json({ error: conversion.erreur });
+  // Les deux champs sont validés AVANT la moindre écriture : une requête qui
+  // porte une adhésion correcte et une contribution aberrante ne doit rien
+  // modifier du tout, plutôt que la moitié.
+  const colonnes = [];
+  const valeurs = [];
+
+  if (veutAdhesion) {
+    const conversion = convertirAdhesion(adhesionDemandee);
+    if (conversion.erreur) {
+      console.warn(`[admin] correction refusée : ${conversion.erreur}`);
+      return reponse.status(400).json({ error: conversion.erreur });
+    }
+    colonnes.push('date_adhesion = ?');
+    valeurs.push(conversion.date);
+  }
+
+  if (veutContribution) {
+    const lecture = lireContribution(contributionDemandee);
+    if (lecture.erreur) {
+      console.warn(`[admin] correction refusée : ${lecture.erreur}`);
+      return reponse.status(400).json({ error: lecture.erreur });
+    }
+    colonnes.push('contribution = ?');
+    valeurs.push(lecture.montant);
   }
 
   try {
-    const resultat = await executer('UPDATE members SET date_adhesion = ? WHERE id = ?', [
-      conversion.date,
-      identifiant,
-    ]);
+    const resultat = await executer(
+      `UPDATE members SET ${colonnes.join(', ')} WHERE id = ?`,
+      [...valeurs, identifiant]
+    );
 
     if (resultat.changements === 0) {
       return reponse.status(404).json({ error: 'Membre introuvable' });
     }
 
     const ligne = await lireUne(
-      `SELECT id, name, date_adhesion, statut, date_statut, motif_statut, created_at
+      `SELECT id, name, date_adhesion, contribution, statut, date_statut, motif_statut, created_at
          FROM members WHERE id = ?`,
       [identifiant]
     );
 
     console.log(
-      `[admin] adhésion corrigée : #${identifiant} ${ligne.name} → ${conversion.date.slice(0, 7)}`
+      `[admin] fiche corrigée : #${identifiant} ${ligne.name} — ` +
+        `adhésion ${String(ligne.date_adhesion || '').slice(0, 7)}, ` +
+        `contribution ${contributionDe(ligne)}`
     );
     return reponse.status(200).json(formaterMembre(ligne));
   } catch (erreur) {
-    console.error(`[admin] erreur à la correction de l'adhésion #${identifiant} : ${erreur.message}`);
-    return reponse.status(500).json({ error: 'Impossible de corriger la date d’adhésion' });
+    console.error(`[admin] erreur à la correction de la fiche #${identifiant} : ${erreur.message}`);
+    return reponse.status(500).json({ error: 'Impossible de corriger la fiche du membre' });
   }
 });
 
@@ -271,7 +362,7 @@ routeur.post('/members/:id/statut', async (requete, reponse) => {
     );
 
     const ligne = await lireUne(
-      `SELECT id, name, date_adhesion, statut, date_statut, motif_statut, created_at
+      `SELECT id, name, date_adhesion, contribution, statut, date_statut, motif_statut, created_at
          FROM members WHERE id = ?`,
       [identifiant]
     );

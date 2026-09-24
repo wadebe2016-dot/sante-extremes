@@ -17,6 +17,10 @@
  * remise de l'argent (`date_versement`) n'est ici qu'un détail d'affichage de la
  * sous-ligne : elle ne décide que de la trésorerie.
  *
+ * LOT 4 bis : chaque membre porte sa « contribution » — le montant mensuel
+ * attendu de lui. Il n'est pas uniforme (5 000 ou 10 000), et l'écran s'en sert
+ * pour expliquer un arriéré plutôt que de laisser deviner un barème.
+ *
  * LOT 4 : les membres MIS À L'ÉCART sortent de ce tableau. Le total « X/38 à
  * jour » compte ceux qui sont tenus de cotiser ; y laisser un membre écarté
  * ferait baisser le pourcentage pour une dette qu'il n'a plus à honorer le mois
@@ -29,6 +33,7 @@ const express = require('express');
 const { lireToutes } = require('../db');
 const { calculerSoldeReel } = require('./tresorerie');
 const { estRegularisation } = require('./cotisations');
+const { contributionDe } = require('../services/arrieres');
 
 const routeur = express.Router();
 
@@ -41,6 +46,7 @@ routeur.get('/', async (requete, reponse) => {
       SELECT
         m.id,
         m.name,
+        m.contribution,
         MAX(c.date_paiement) AS last_paiement,
         MAX(CASE
               WHEN strftime('%Y-%m', c.date_paiement) = strftime('%Y-%m', 'now') THEN 1
@@ -138,6 +144,9 @@ routeur.get('/', async (requete, reponse) => {
       return {
         id: ligne.id,
         name: ligne.name,
+        // Montant mensuel attendu de CE membre : la cotisation n'est pas
+        // uniforme, et l'écran doit pouvoir dire « 5 000/mois » sous son nom.
+        contribution: contributionDe(ligne),
         paid: paye,
         statut_mois: statutMois,
         motif_refus: statutMois === 'impaye' ? refusParMembre.get(ligne.id) || null : null,
