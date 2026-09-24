@@ -425,8 +425,14 @@ d'arriérés sans ouvrir l'écran. C'est ce qui les distingue de trois boutons.
 | Carte | Icône | Chiffre | Libellé | Destination |
 | --- | --- | --- | --- | --- |
 | Séance | ballon | éligibles du jour | « peuvent jouer » | écran Séance |
-| Impayés | alerte | total formaté (« 670 000 ») | « Impayés » | écran Impayés |
+| Total dû | alerte | total formaté (« 670 000 ») | « Total dû · tous mois » | écran Impayés |
 | Mesures | balance | à pénaliser + à écarter | « mesures à appliquer » | écran Mesures |
+
+Le raccourci ne s'appelle pas « Impayés » alors que l'écran qu'il ouvre, si. L'écran État porte
+déjà une puce de filtre « Impayés », qui restreint la liste aux membres non à jour **du mois en
+cours** ; le raccourci, lui, additionne **tous les mois**. Deux chiffres différents ne peuvent pas
+porter le même mot — c'est la portée qui les sépare, elle est donc écrite. La carte est élargie à
+168 px, étant la plus bavarde des trois.
 
 **Avant la date d'effet**, la carte Mesures affiche un tiret grisé et « à partir du 6 oct » : rien
 n'est applicable, et un chiffre noir inviterait à une action que le serveur refuserait en 409. Elle
