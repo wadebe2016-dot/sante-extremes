@@ -236,6 +236,9 @@ Le barème de base (10 000 XAF) vit dans `src/services/arrieres.js`, surchargeab
 `COTISATION_MENSUELLE`. Il ne s'applique qu'aux membres sans contribution propre : voir la section
 A bis. **Rien à poser en production.**
 
+L'écran porte le surtitre **« Redevances »** — le terme employé par l'association — et le titre
+« Arriérés ». Le même libellé nomme la carte de l'onglet Plus et le raccourci de l'écran État.
+
 Application — écran « Arriérés » (onglet Plus, lecture publique) : bandeau avec le total et la
 répartition 1 / 2 / 3 mois et plus ; liste par membre avec les mois dus en puces, le montant dû, la
 **contribution et la date d'adhésion en petit** (« 5 000/mois · adhésion mai 2026 ») — ce sont elles
@@ -417,7 +420,7 @@ d'arriérés sans ouvrir l'écran. C'est ce qui les distingue de trois boutons.
 | Carte | Icône | Chiffre | Libellé | Destination |
 | --- | --- | --- | --- | --- |
 | Séance | ballon | éligibles du jour | « peuvent jouer » | écran Séance |
-| Arriérés | alerte | total formaté (« 670 000 ») | « XAF dus » | écran Arriérés |
+| Arriérés | alerte | total formaté (« 670 000 ») | « Redevances » | écran Arriérés |
 | Mesures | balance | à pénaliser + à écarter | « mesures à appliquer » | écran Mesures |
 
 **Avant la date d'effet**, la carte Mesures affiche un tiret grisé et « à partir du 6 oct » : rien
