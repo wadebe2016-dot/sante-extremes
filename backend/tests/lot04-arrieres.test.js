@@ -50,6 +50,7 @@ const {
   fenetreVersement,
   dansLesDelais,
   moisDecale,
+  samediDeLaSemaine,
   construireSituation,
 } = require('../src/services/arrieres');
 const { construireArrieres } = require('../src/routes/arrieres');
@@ -946,6 +947,47 @@ test('les raccourcis disent les mêmes chiffres que les trois écrans', async ()
   );
   assert.equal(stats.corps.raccourcis.mesures_a_penaliser, mesures.corps.resume.a_penaliser);
   assert.equal(stats.corps.raccourcis.mesures_a_ecarter, mesures.corps.resume.a_ecarter);
+});
+
+test('les raccourcis annoncent la date de la prochaine séance', async () => {
+  const mois = new Date().toISOString().slice(0, 7);
+  await ajouterMembre(1, 'A Jour', mois);
+  await cotiser(1, mois);
+
+  const { corps } = await appeler('/api/stats');
+  const samedi = corps.raccourcis.date_seance;
+
+  assert.match(samedi, /^\d{4}-\d{2}-\d{2}$/);
+  // 6 = samedi. La séance annoncée en est toujours un, quel que soit le jour.
+  assert.equal(new Date(`${samedi}T12:00:00Z`).getUTCDay(), 6);
+  assert.ok(samedi >= new Date().toISOString().slice(0, 10), 'la séance ne peut pas être passée');
+  assert.equal(typeof corps.raccourcis.eligibles_seance, 'number');
+});
+
+test('le samedi et le jour courant se suivent selon la règle', async () => {
+  const samedi = (jour) => samediDeLaSemaine(jour);
+
+  assert.equal(samedi('2026-09-21'), '2026-09-26'); // lundi
+  assert.equal(samedi('2026-09-25'), '2026-09-26'); // vendredi
+  assert.equal(samedi('2026-09-26'), '2026-09-26'); // samedi : le jour même
+  assert.equal(samedi('2026-09-27'), '2026-10-03'); // dimanche : le suivant
+  // Mercredi 30 septembre → samedi 3 octobre : la séance change de mois.
+  assert.equal(samedi('2026-09-30'), '2026-10-03');
+});
+
+test('les éligibles du raccourci sont comptés à la date de la séance', async () => {
+  const mois = new Date().toISOString().slice(0, 7);
+
+  await ajouterMembre(1, 'A Jour', mois);
+  await cotiser(1, mois);
+
+  const { corps } = await appeler('/api/stats');
+  const samedi = corps.raccourcis.date_seance;
+
+  // Le chiffre du raccourci doit être celui que /api/seance annonce pour CE
+  // jour-là : c'est l'écran qui s'ouvre au toucher de la carte.
+  const seance = await appeler(`/api/seance?date=${samedi}`);
+  assert.equal(corps.raccourcis.eligibles_seance, seance.corps.resume.eligibles);
 });
 
 test('les raccourcis annoncent la date d’effet et l’applicabilité', async () => {

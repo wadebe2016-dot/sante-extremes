@@ -226,6 +226,31 @@ function dansLesDelais(moisDu, dateVersement) {
   return jour >= ouverture && jour <= echeance;
 }
 
+/**
+ * Samedi de la semaine en cours, au format AAAA-MM-JJ.
+ *
+ * L'association joue le samedi : c'est la date que l'écran d'accueil annonce et
+ * celle sur laquelle la feuille de séance s'ouvre. Le dimanche, le samedi de la
+ * semaine est derrière nous — on prend alors celui de la semaine suivante,
+ * puisque c'est la prochaine séance.
+ *
+ * Midi en temps universel, comme partout ailleurs dans le projet : une date
+ * posée à minuit bascule de jour à l'ouest de Greenwich.
+ *
+ * @param {string} [jour] date de référence, AAAA-MM-JJ ; aujourd'hui par défaut
+ */
+function samediDeLaSemaine(jour = aujourdhui()) {
+  const date = new Date(`${String(jour).slice(0, 10)}T12:00:00Z`);
+  if (Number.isNaN(date.getTime())) return jour;
+
+  const jourSemaine = date.getUTCDay(); // 0 = dimanche, 6 = samedi
+  // Dimanche : le samedi est passé, la prochaine séance est dans six jours.
+  const ecart = jourSemaine === 0 ? 6 : 6 - jourSemaine;
+
+  date.setUTCDate(date.getUTCDate() + ecart);
+  return date.toISOString().slice(0, 10);
+}
+
 /** Pénalité proposée pour un nombre de mois dus ; 0 au-delà du seuil d'écart. */
 function penaliteProposee(nbMois) {
   if (nbMois >= SEUIL_ECART) return 0; // mise à l'écart, et pas de pénalité en plus
@@ -509,6 +534,7 @@ module.exports = {
   moisEnLettres,
   moisAnneeEnLettres,
   jourCourt,
+  samediDeLaSemaine,
   fenetreVersement,
   dansLesDelais,
   penaliteProposee,

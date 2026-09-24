@@ -5,7 +5,7 @@ Deux dépôts modifiés :
 | Dépôt | Branche | Contenu |
 | --- | --- | --- |
 | `sante-extremes` (backend Express) | `master` | Date d'adhésion, contribution, statut du membre, `/api/arrieres`, `/api/seance`, `/api/mesures`, bloc `raccourcis` de `/api/stats` |
-| `sante-extremes-flutter` (application) | `main` | Écrans Arriérés, Séance, Mesures du mois ; raccourcis sur l'écran État ; adhésion, contribution et mise à l'écart sur l'écran Membres |
+| `sante-extremes-flutter` (application) | `main` | Écrans Impayés, Séance, Mesures du mois ; carte de séance sur l'écran État ; adhésion, contribution et mise à l'écart sur l'écran Membres |
 
 Décisions du bureau exécutif traduites en code :
 
@@ -206,7 +206,7 @@ disent explicitement ce qui est conservé.
 
 ---
 
-## C. Arriérés
+## C. Impayés
 
 `GET /api/arrieres?mois=AAAA-MM` — **public**, mois en cours par défaut. Disponible dès le
 déploiement : cette route ne dépend d'aucune date d'effet.
@@ -414,63 +414,90 @@ censeur, « Mettre à l'écart » le code secrétaire, chacun avec récapitulati
 
 ---
 
-## F. Raccourcis de l'écran État
+## F. Carte de séance de l'écran État
 
 Les trois écrans du lot vivaient dans l'onglet Plus, à deux gestes de l'accueil. Une rangée de trois
-cartes s'intercale désormais **entre le bandeau sombre et le champ de recherche**.
+raccourcis chiffrés a d'abord été posée entre le bandeau sombre et le champ de recherche — Séance,
+Impayés, Mesures — puis **ramenée à une seule carte, pleine largeur**.
 
-Ce sont des raccourcis, mais ils portent chacun **leur chiffre** : on apprend qu'il y a 670 000
-d'arriérés sans ouvrir l'écran. C'est ce qui les distingue de trois boutons.
+Trois cartes valaient trois chiffres, donc trois décisions à prendre avant même d'avoir lu la liste
+des membres. Une seule question mérite cette place-là, et c'est celle qu'on pose le samedi matin :
+**qui peut jouer ?**
 
-| Carte | Icône | Chiffre | Libellé | Destination |
-| --- | --- | --- | --- | --- |
-| Séance | ballon | éligibles du jour | « peuvent jouer » | écran Séance |
-| Total dû | alerte | total formaté (« 670 000 ») | « Total dû · tous mois » | écran Impayés |
-| Mesures | balance | à pénaliser + à écarter | « mesures à appliquer » | écran Mesures |
+```
+┌────────────────────────────────────────────┐
+│ ⚽  Séance de ce samedi 26 septembre     ›  │
+│     21  peuvent jouer                      │
+└────────────────────────────────────────────┘
+```
 
-Le raccourci ne s'appelle pas « Impayés » alors que l'écran qu'il ouvre, si. L'écran État porte
-déjà une puce de filtre « Impayés », qui restreint la liste aux membres non à jour **du mois en
-cours** ; le raccourci, lui, additionne **tous les mois**. Deux chiffres différents ne peuvent pas
-porter le même mot — c'est la portée qui les sépare, elle est donc écrite. La carte est élargie à
-168 px, étant la plus bavarde des trois.
+| Élément | Contenu |
+| --- | --- |
+| Titre | « Séance de ce \<jour\> », daté du samedi de la semaine |
+| Chiffre | éligibles **à cette date**, ou « — » tant qu'il n'est pas chargé |
+| Libellé | « peuvent jouer » |
+| Appui | écran Séance, **ouvert sur ce samedi** |
 
-**Avant la date d'effet**, la carte Mesures affiche un tiret grisé et « à partir du 6 oct » : rien
-n'est applicable, et un chiffre noir inviterait à une action que le serveur refuserait en 409. Elle
-reste tapable — le bureau veut voir venir. **Après**, une pastille orange signale qu'il y a à
-traiter, et disparaît quand le compte tombe à zéro : une pastille à zéro n'est que du bruit.
+### Le samedi de la semaine
 
-Charte : cartes blanches, bord `#E6E3DD`, rayon 16, chiffre Manrope 600 en 18, libellé 11 px gris.
-Hauteur 72 px, **défilement horizontal** — sur 360 px, trois colonnes de 108 px couperaient « peuvent
-jouer » en deux ; mieux vaut laisser la troisième dépasser, elle invite au geste qui la révèle.
+L'association joue le samedi. La date est calculée, jamais saisie :
 
-Aucun code requis, visibles de tous. **Les entrées de l'onglet Plus restent en place** : les
-raccourcis s'ajoutent à la navigation, ils ne la remplacent pas.
+| Jour courant | Séance annoncée |
+| --- | --- |
+| lundi → vendredi | le samedi qui vient |
+| samedi | le jour même |
+| dimanche | le samedi suivant — celui de la semaine est passé |
+
+`samediDeLaSemaine()` existe des deux côtés, dans `src/services/arrieres.js` et dans
+`lib/utils/cycle_cotisation.dart` : le serveur en a besoin pour compter les éligibles, l'application
+pour écrire le titre avant même d'avoir reçu la réponse. Une fois `date_seance` reçu, c'est lui qui
+fait foi — titre et chiffre parlent alors forcément du même jour.
+
+**Le chiffre est compté à la date de la séance, pas à celle du jour.** Un mercredi 30 septembre
+annonce le samedi 3 octobre : la cotisation due n'est plus celle du même mois, et l'éligibilité de
+tout le monde change avec. `/api/stats` construit donc une seconde situation quand le samedi ne
+tombe pas aujourd'hui — sur une quarantaine de membres, le coût est nul et la justesse acquise.
+
+Le format tait l'année : la séance annoncée est toujours celle de la semaine en cours ou de la
+suivante, et « 2026 » n'apprendrait rien tout en allongeant un titre déjà long.
+
+Un **tiret** plutôt qu'un zéro tant que le chargement n'a pas abouti : « 0 peuvent jouer » serait une
+information fausse, alors qu'on ne sait simplement pas encore.
+
+**Les écrans Impayés et Mesures n'ont pas disparu** : leurs entrées de l'onglet Plus sont intactes,
+là où on les cherche quand on les cherche. Le rappel des mesures du mois reste lui aussi sur l'écran
+État, sous la carte, à partir de la date d'effet.
+
+Charte : carte blanche, bord `#E6E3DD`, rayon 16, titre Manrope 600 en 15, chiffre en 18, libellé
+11 px gris. Aucun code requis, visible de tous.
 
 ### Un seul appel réseau
 
-Les chiffres viennent d'un bloc `raccourcis` ajouté à `GET /api/stats` :
+Le chiffre vient du bloc `raccourcis` ajouté à `GET /api/stats` :
 
 ```json
-{ "raccourcis": { "eligibles_aujourdhui": 21, "total_arrieres": 670000,
+{ "raccourcis": { "eligibles_aujourdhui": 21,
+                  "date_seance": "2026-09-26", "eligibles_seance": 21,
+                  "total_arrieres": 670000,
                   "mesures_en_attente": 14, "mesures_a_penaliser": 9,
                   "mesures_a_ecarter": 5, "mesures_applicable": true,
                   "date_effet_mesures": "2026-10-06", "total_membres_seance": 38 } }
 ```
 
-Trois appels supplémentaires au premier rendu auraient été trois allers-retours de trop sur des
-téléphones où la connexion est le facteur limitant. Le bloc dérive d'**une seule** construction de la
-situation, et l'ancien second appel à `/api/mesures` depuis l'écran État a disparu avec lui.
+Le bloc reste complet bien que la carte n'en lise qu'un champ : `mesures_a_penaliser` et
+`mesures_a_ecarter` alimentent le rappel des mesures, et le reste est servi sans coût — il dérive
+d'**une seule** construction de la situation, déjà faite pour le premier chiffre.
 
-Pour que les raccourcis ne deviennent pas un second jeu de chiffres, deux fonctions de domaine ont
-été remontées dans `src/services/arrieres.js` :
+Pour que ces chiffres ne deviennent pas un second jeu de vérités, deux fonctions de domaine vivent
+dans `src/services/arrieres.js` :
 
-- `motifInegibilite(membre, mois)` — la cascade d'éligibilité, désormais partagée par `/api/seance`
-  et `/api/stats` ;
+- `motifInegibilite(membre, mois)` — la cascade d'éligibilité, partagée par `/api/seance` et
+  `/api/stats` ;
 - `classerMesures(situation)` — la répartition à pénaliser / à écarter / à jour, partagée par
   `/api/mesures` et `/api/stats`.
 
-Les routes n'en gardent que la mise en forme. Un test vérifie explicitement que chaque raccourci
-annonce **le même chiffre que l'écran qu'il ouvre**.
+Les routes n'en gardent que la mise en forme. Un test vérifie que chaque chiffre du bloc annonce
+**la même valeur que l'écran correspondant**.
 
 ### Vérifications
 
@@ -483,18 +510,23 @@ annonce **le même chiffre que l'écran qu'il ouvre**.
 | Raccourci vs `/api/mesures` | mêmes comptes | OK |
 | Membre écarté à jour de sa cotisation | hors des éligibles | OK — 1 sur 2 |
 | Base sans membre | zéros, jamais `null` | OK |
-| Avant la date d'effet | `mesures_applicable: false` | OK |
-| Après | `true` | OK |
-| Carte à 72 px, trois libellés réels | aucun débordement | OK — testé au pixel |
-| Chiffre démesuré (999 999 999) | tronqué, largeur tenue | OK |
-| Carte grisée | chiffre en gris, **toujours tapable** | OK |
-| Pastille orange | absente à zéro, présente sinon | OK |
+| `date_seance` | toujours un samedi, jamais dans le passé | OK |
+| Lundi / vendredi / samedi / dimanche | samedi qui vient / le jour même / le suivant | OK sur les quatre |
+| Mercredi 30 septembre | samedi 3 octobre — la séance change de mois | OK |
+| `eligibles_seance` vs `/api/seance?date=<samedi>` | même chiffre | OK |
+| Titre | « Séance de ce samedi 26 septembre », sans l'année | OK |
+| Carte sur 360 px | pleine largeur (328 px), sans débordement | OK |
+| Carte sur 320 px | pleine largeur (288 px), sans débordement | OK |
+| Chiffre non chargé | « — », jamais « 0 » | OK |
+| Titre démesuré | abrégé, carte inchangée | OK |
+| Appui | ouvre l'écran Séance | OK |
+| Charte | fond blanc, bord `#E6E3DD`, rayon 16 | OK |
 
 ---
 
 ## G. État des vérifications automatiques
 
-Backend — `npm test` : **65 tests, 65 verts, 0 échec** (20 du LOT 3 ter inchangés, 45 dans
+Backend — `npm test` : **68 tests, 68 verts, 0 échec** (20 du LOT 3 ter inchangés, 48 dans
 `tests/lot04-arrieres.test.js`). `node --check` passé sur tous les fichiers modifiés :
 `src/db.js`, `src/index.js`, `src/services/arrieres.js`, `src/routes/{admin,arrieres,seance,mesures,
 stats,journal,cotisations,export}.js`.
@@ -508,9 +540,11 @@ Migration éprouvée deux fois sur des bases reconstruites au schéma d'avant le
 
 Application — `flutter analyze` : **0 erreur, 0 avertissement** (111 infos de style, de même nature
 que les 94 d'avant : `prefer_expression_function_bodies` sur les `build`, conformes à l'usage du
-projet). `flutter test` : **42 tests verts** — 18 d'avant, 18 dans
-`test/cycle_cotisation_test.dart`, 6 dans `test/carte_raccourci_test.dart`, ces derniers montant la
-carte dans la hauteur exacte que lui impose la rangée. APK release arm64 construit en local.
+projet). `flutter test` : **54 tests verts** — 18 d'avant, 28 dans
+`test/cycle_cotisation_test.dart`, 8 dans `test/carte_seance_test.dart`. Ces derniers montent la
+carte dans la largeur d'un téléphone étroit ; ils ne mesurent PAS la largeur des libellés, le banc
+d'essai n'ayant pas Manrope et rendant chaque caractère dans un carré d'un cadratin — une telle
+assertion mesurerait la police de test, pas la mise en page. APK release arm64 construit en local.
 
 ---
 
@@ -520,8 +554,9 @@ carte dans la hauteur exacte que lui impose la rangée. APK release arm64 constr
    `members.date_adhesion` ; et le montant dû appliquait 10 000 à tous, au lieu de
    `members.contribution` — 5 000 pour une partie de l'effectif.
 2. Trois routes **publiques en lecture** : `/api/arrieres` (disponible dès le déploiement),
-   `/api/seance` (les censeurs contrôlent au bord du terrain), `/api/mesures`. Leurs trois chiffres
-   remontent dans le bloc `raccourcis` de `/api/stats`, affiché en tête de l'écran d'accueil.
+   `/api/seance` (les censeurs contrôlent au bord du terrain), `/api/mesures`. Leurs chiffres
+   remontent dans le bloc `raccourcis` de `/api/stats` ; l'écran d'accueil n'en affiche qu'un, en
+   tête : « Séance de ce samedi 26 septembre — 21 peuvent jouer », daté du samedi de la semaine.
 3. **Les mesures ne s'appliquent qu'à partir du 6 octobre 2026** : avant, listes consultables et
    `POST` refusés en 409. Écriture réservée — pénalités au censeur, mises à l'écart au secrétaire.
 4. **Idempotence** sur les deux `POST` : rejouer une liste n'inflige rien deux fois. Le barème et le

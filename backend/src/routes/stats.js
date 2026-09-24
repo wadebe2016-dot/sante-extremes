@@ -48,6 +48,7 @@ const {
   mesuresApplicables,
   dateEffetMesures,
   aujourdhui,
+  samediDeLaSemaine,
 } = require('../services/arrieres');
 
 const routeur = express.Router();
@@ -198,10 +199,25 @@ routeur.get('/', async (requete, reponse) => {
     const situationMembres = await construireSituation(moisRaccourcis, jour);
     const classement = classerMesures(situationMembres);
 
+    // La séance se joue le samedi : c'est cette date que l'écran d'accueil
+    // annonce, et sur elle que la feuille de séance s'ouvre. Un samedi tombant
+    // le mois suivant change l'éligibilité de tout le monde — la cotisation due
+    // n'est plus la même — d'où une situation construite à sa date, et non
+    // celle d'aujourd'hui.
+    const samedi = samediDeLaSemaine(jour);
+    const moisSamedi = samedi.slice(0, 7);
+    const situationSamedi =
+      samedi === jour ? situationMembres : await construireSituation(moisSamedi, samedi);
+
     const raccourcis = {
       // Qui peut fouler le terrain aujourd'hui : même cascade que /api/seance.
       eligibles_aujourdhui: situationMembres.filter(
         (membre) => motifInegibilite(membre, moisRaccourcis) === null
+      ).length,
+      // Qui pourra jouer à la prochaine séance.
+      date_seance: samedi,
+      eligibles_seance: situationSamedi.filter(
+        (membre) => motifInegibilite(membre, moisSamedi) === null
       ).length,
       // Somme des montants dus au titre des cotisations, pénalités exclues :
       // même chiffre que le bandeau de l'écran Arriérés.
@@ -246,7 +262,7 @@ routeur.get('/', async (requete, reponse) => {
       `[stats] tableau public servi : ${synthese.paid}/${synthese.total_members} à jour ` +
         `(${synthese.percentage_paid} %) pour ${moisCourant}, ${montantEncaisse} XAF encaissés, ` +
         `${situation.solde} XAF en caisse — raccourcis : ` +
-        `${raccourcis.eligibles_aujourdhui} éligible(s), ` +
+        `${raccourcis.eligibles_seance} éligible(s) le ${raccourcis.date_seance}, ` +
         `${raccourcis.total_arrieres} XAF d'arriérés, ` +
         `${raccourcis.mesures_en_attente} mesure(s) en attente`
     );
