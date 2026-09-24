@@ -11,9 +11,14 @@ PRAGMA foreign_keys = ON;
 
 -- Table des membres de l'association (~50 personnes)
 CREATE TABLE IF NOT EXISTS members (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  name       TEXT NOT NULL UNIQUE,
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  name          TEXT NOT NULL UNIQUE,
+  -- LOT 4 : voir le bloc « Date d'adhésion, statut du membre » en fin de fichier.
+  date_adhesion DATE,
+  statut        TEXT NOT NULL DEFAULT 'actif' CHECK (statut IN ('actif', 'ecarte')),
+  date_statut   DATETIME,
+  motif_statut  TEXT,
+  created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
 -- Table des paiements de cotisation, rattachés à un membre
@@ -53,6 +58,8 @@ CREATE TABLE IF NOT EXISTS cotisations (
 CREATE INDEX IF NOT EXISTS idx_cotisations_member ON cotisations (member_id);
 CREATE INDEX IF NOT EXISTS idx_cotisations_date ON cotisations (date_paiement);
 CREATE INDEX IF NOT EXISTS idx_cotisations_statut ON cotisations (member_id, statut);
+-- LOT 4 : les arriérés se lisent par membre et par mois dû.
+CREATE INDEX IF NOT EXISTS idx_cotisations_mois ON cotisations (statut, date_paiement);
 
 -- ---------------------------------------------------------------------------
 -- LOT 3 — Sanctions : pénalités financières et suspensions
@@ -79,6 +86,8 @@ CREATE TABLE IF NOT EXISTS sanctions (
   date_reglement  TEXT,
   moyen_reglement TEXT,
   encaisse_par    TEXT,   -- trésorier ayant encaissé la pénalité (LOT 3 ter)
+  inflige_par     TEXT,   -- qui a prononcé la sanction (LOT 4)
+  mois_concerne   TEXT,   -- mois de cotisation d'une pénalité de retard (AAAA-MM, LOT 4)
   fichier_s3_url  TEXT,
   FOREIGN KEY (member_id) REFERENCES members (id) ON DELETE CASCADE
 );
@@ -86,6 +95,7 @@ CREATE TABLE IF NOT EXISTS sanctions (
 CREATE INDEX IF NOT EXISTS idx_sanctions_member ON sanctions (member_id);
 CREATE INDEX IF NOT EXISTS idx_sanctions_statut ON sanctions (statut);
 CREATE INDEX IF NOT EXISTS idx_sanctions_date ON sanctions (date_sanction);
+CREATE INDEX IF NOT EXISTS idx_sanctions_mois ON sanctions (member_id, type, mois_concerne);
 
 -- ---------------------------------------------------------------------------
 -- LOT 3 — Documents déposés sur S3
@@ -190,3 +200,49 @@ CREATE TABLE IF NOT EXISTS parametres (
   definit_par TEXT,
   date_maj    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
+
+-- ---------------------------------------------------------------------------
+-- LOT 4 — Date d'adhésion, statut du membre
+--
+-- Ces colonnes sont ajoutées à « members » par src/db.js sur les bases
+-- existantes : un CREATE TABLE IF NOT EXISTS n'ajoute rien à une table déjà
+-- présente. Elles figurent ici pour qu'une base neuve naisse complète.
+--
+--   date_adhesion  mois d'entrée dans l'association, au 1ᵉʳ du mois. C'est le
+--                  point de départ de TOUT calcul d'arriéré : un membre entré
+--                  en mai ne doit rien pour janvier. À la migration, elle est
+--                  déduite de la première cotisation validée, à défaut du mois
+--                  de création de la fiche.
+--   statut         'actif' ou 'ecarte'. Le terme employé partout est « mis à
+--                  l'écart » — jamais « radié ». Un membre écarté sort des
+--                  éligibles d'une séance et du total « X/38 à jour », mais
+--                  reste dans l'historique et dans les exports.
+--   date_statut    horodatage du dernier changement de statut.
+--   motif_statut   raison invoquée, telle que saisie par le secrétariat.
+-- ---------------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
+-- LOT 4 — Événements de statut des membres
+--
+-- Le journal d'activité (src/routes/journal.js) se reconstitue à partir des
+-- tables métier : cotisations, sanctions, demandes, décaissements. Une mise à
+-- l'écart ne laissait aucune trace exploitable — « members.statut » dit l'état
+-- courant, pas l'histoire. D'où cette table, qui consigne chaque bascule avec
+-- son auteur.
+--
+-- Elle n'est JAMAIS purgée : une réintégration n'efface pas la mise à l'écart
+-- qui l'a précédée, sans quoi la décision serait impossible à justifier en
+-- assemblée.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS evenements_membres (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  member_id  INTEGER NOT NULL,
+  type       TEXT NOT NULL CHECK (type IN ('mise_a_l_ecart', 'reintegration')),
+  motif      TEXT,
+  acteur     TEXT,
+  mois       TEXT,   -- mois de cotisation à l'origine de la mesure (AAAA-MM)
+  date_evenement TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+  FOREIGN KEY (member_id) REFERENCES members (id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_evenements_membres_membre ON evenements_membres (member_id);
+CREATE INDEX IF NOT EXISTS idx_evenements_membres_date ON evenements_membres (date_evenement);

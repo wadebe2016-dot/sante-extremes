@@ -12,6 +12,7 @@ const cors = require('cors');
 
 const { migrer, fermerBd } = require('./db');
 const routesAdmin = require('./routes/admin');
+const routesArrieres = require('./routes/arrieres');
 const routesAuth = require('./routes/auth');
 const routesCotisations = require('./routes/cotisations');
 const routesDecaissements = require('./routes/decaissements');
@@ -20,8 +21,10 @@ const routesDocuments = require('./routes/documents');
 const routesExport = require('./routes/export');
 const routesHistorique = require('./routes/historique');
 const routesJournal = require('./routes/journal');
+const routesMesures = require('./routes/mesures');
 const routesPenalites = require('./routes/penalites');
 const routesSanctions = require('./routes/sanctions');
+const routesSeance = require('./routes/seance');
 const routesStats = require('./routes/stats');
 const routesTresorerie = require('./routes/tresorerie');
 
@@ -68,6 +71,12 @@ application.use('/api/journal', routesJournal);
 application.use('/api/tresorerie', routesTresorerie);
 application.use('/api/decaissements', routesDecaissements); // lecture publique, justificatif restreint
 application.use('/api/export', routesExport);
+// LOT 4 — arriérés et feuille de séance : lecture publique et sans code. Les
+// censeurs contrôlent à l'entrée du terrain, le bureau lit les arriérés en
+// assemblée ; exiger un code là aurait rendu les deux écrans inutilisables.
+application.use('/api/arrieres', routesArrieres);
+application.use('/api/seance', routesSeance);
+application.use('/api/mesures', routesMesures); // lecture publique, écriture censeur/secrétaire
 
 // Vérification d'un code de rôle (aucune action métier)
 application.use('/api/auth', routesAuth);

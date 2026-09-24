@@ -10,7 +10,8 @@
  *
  * Le tableau des cotisations range les montants sur le MOIS DÛ — il ne change
  * pas. Le classeur Excel porte en plus une feuille « Versements » : la même
- * population, vue par date de remise de l'argent, régularisations signalées.
+ * population, vue par date de remise de l'argent, régularisations signalées,
+ * et depuis le LOT 4 une feuille « Arriérés » : qui doit quoi, et depuis quand.
  *
  * Les fiches santé n'apparaissent dans aucun export : ce sont des données de
  * santé, elles ne sortent jamais de l'écran du secrétariat.
@@ -29,6 +30,8 @@ const { construireHistorique, lireAnnee, MOIS } = require('./historique');
 const { CATEGORIES } = require('./demandes');
 const { calculerSoldeReel } = require('./tresorerie');
 const { estRegularisation } = require('./cotisations');
+const { construireArrieres } = require('./arrieres');
+const { moisCourant, moisAnneeEnLettres } = require('../services/arrieres');
 
 const routeur = express.Router();
 
@@ -170,6 +173,21 @@ function nomFichier(extension, annee) {
   return `Cotisations_${annee}.${extension}`;
 }
 
+/**
+ * Mois auquel arrêter l'état des arriérés d'un classeur.
+ *
+ * Pour l'année en cours, le mois courant — c'est la question qu'on se pose en
+ * réunion. Pour une année révolue, son mois de décembre : arrêter un exercice
+ * clos au mois d'aujourd'hui n'aurait aucun sens.
+ *
+ * @param {number} annee année demandée à l'export
+ * @returns {string} mois au format AAAA-MM
+ */
+function moisArrieres(annee) {
+  const courant = moisCourant();
+  return String(annee) === courant.slice(0, 4) ? courant : `${annee}-12`;
+}
+
 // ---------------------------------------------------------------------------
 // Export Excel
 // ---------------------------------------------------------------------------
@@ -290,7 +308,113 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
     feuilleVersements.getColumn(4).numFmt = '# ##0';
     feuilleVersements.getColumn(4).alignment = { horizontal: 'right' };
 
-    // --- Feuille 3 : pénalités ---------------------------------------------
+    // --- Feuille 3 : arriérés ----------------------------------------------
+    //
+    // LOT 4. Les feuilles précédentes disent ce qui est ENTRÉ ; celle-ci dit ce
+    // qui MANQUE. Les mois dus partent de la DATE D'ADHÉSION de chaque membre,
+    // jamais de janvier : un membre entré en mai ne doit rien pour les quatre
+    // premiers mois de l'année, et l'écrire autrement gonflerait le total
+    // présenté en assemblée.
+    //
+    // Mêmes chiffres que GET /api/arrieres, par construction : la feuille
+    // appelle la fonction de la route, elle ne refait pas le calcul.
+    const moisCible = moisArrieres(annee);
+    const arrieres = await construireArrieres(moisCible);
+    const feuilleArrieres = classeur.addWorksheet('Arriérés');
+
+    feuilleArrieres.columns = [
+      { header: 'Membre', key: 'membre', width: 28 },
+      { header: 'Adhésion', key: 'adhesion', width: 14 },
+      { header: 'Mois dus', key: 'nb_mois', width: 11 },
+      { header: 'Détail des mois', key: 'detail', width: 38 },
+      { header: 'Montant dû', key: 'montant', width: 14 },
+      { header: 'Pénalités dues', key: 'penalites', width: 15 },
+      { header: 'Total dû', key: 'total', width: 14 },
+      { header: 'Dernier versement', key: 'versement', width: 18 },
+      { header: 'Statut', key: 'statut', width: 16 },
+    ];
+
+    const enTeteArrieres = feuilleArrieres.getRow(1);
+    enTeteArrieres.font = { bold: true };
+    enTeteArrieres.eachCell((cellule) => {
+      cellule.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE6E3DD' } };
+      cellule.border = { bottom: { style: 'thin', color: { argb: 'FF888780' } } };
+    });
+
+    for (const membre of arrieres.membres) {
+      feuilleArrieres.addRow([
+        membre.name,
+        formaterMoisDu(`${membre.adhesion}-01`),
+        membre.nb_mois,
+        membre.mois_dus.map((mois) => formaterMoisDu(`${mois}-01`)).join(', '),
+        membre.montant_du,
+        membre.penalites_dues,
+        membre.total_du,
+        formaterDate(membre.dernier_versement),
+        membre.statut === 'ecarte' ? 'Mis à l’écart' : 'Actif',
+      ]);
+    }
+
+    if (arrieres.membres.length === 0) {
+      feuilleArrieres.addRow(['Aucun arriéré : tous les membres sont à jour']);
+    }
+
+    const ligneTotalArrieres = feuilleArrieres.addRow([
+      'TOTAL',
+      '',
+      '',
+      '',
+      arrieres.resume.total_arrieres,
+      arrieres.resume.total_penalites,
+      arrieres.resume.total_arrieres + arrieres.resume.total_penalites,
+      '',
+      '',
+    ]);
+    ligneTotalArrieres.font = { bold: true };
+    ligneTotalArrieres.eachCell((cellule) => {
+      cellule.border = { top: { style: 'thin', color: { argb: 'FF1C1B1A' } } };
+    });
+
+    for (const colonne of [5, 6, 7]) {
+      feuilleArrieres.getColumn(colonne).numFmt = '# ##0';
+      feuilleArrieres.getColumn(colonne).alignment = { horizontal: 'right' };
+    }
+    feuilleArrieres.getColumn(3).alignment = { horizontal: 'center' };
+
+    // Pied de feuille : l'arrêté et sa répartition, pour qu'une page imprimée
+    // se suffise à elle-même.
+    feuilleArrieres.addRow([]);
+    const ligneArrete = feuilleArrieres.addRow([
+      `Arrêté au mois de ${moisAnneeEnLettres(moisCible)}`,
+      '',
+      '',
+      `${arrieres.resume.membres_a_jour} à jour · ${arrieres.resume.membres_en_retard} en retard`,
+      '',
+      '',
+      '',
+      '',
+      '',
+    ]);
+    ligneArrete.font = { italic: true };
+
+    const repartition = arrieres.resume.par_anciennete;
+    const ligneRepartition = feuilleArrieres.addRow([
+      'Répartition',
+      '',
+      '',
+      `1 mois : ${repartition['1_mois']} · 2 mois : ${repartition['2_mois']} · ` +
+        `3 mois et plus : ${repartition['3_mois_et_plus']}`,
+      '',
+      '',
+      '',
+      '',
+      '',
+    ]);
+    ligneRepartition.font = { italic: true };
+
+    feuilleArrieres.views = [{ state: 'frozen', xSplit: 1, ySplit: 1 }];
+
+    // --- Feuille 4 : pénalités ---------------------------------------------
     const feuillePenalites = classeur.addWorksheet(`Pénalités ${annee}`);
 
     feuillePenalites.columns = [
@@ -333,7 +457,7 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
     feuillePenalites.getColumn(5).numFmt = '# ##0';
     feuillePenalites.getColumn(5).alignment = { horizontal: 'right' };
 
-    // --- Feuille 4 : dépenses ----------------------------------------------
+    // --- Feuille 5 : dépenses ----------------------------------------------
     const depenses = await lireDepenses(annee);
     const feuilleDepenses = classeur.addWorksheet(`Dépenses ${annee}`);
 
@@ -417,7 +541,8 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
 
     console.log(
       `[export] classeur Excel ${annee} généré : ${historique.nb_membres} membre(s), ` +
-        `${sanctions.length} sanction(s), ${tampon.length} octets`
+        `${sanctions.length} sanction(s), ${arrieres.membres.length} membre(s) en retard, ` +
+        `${tampon.length} octets`
     );
     return reponse.status(200).end(Buffer.from(tampon));
   } catch (erreur) {

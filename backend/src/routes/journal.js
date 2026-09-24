@@ -4,7 +4,8 @@
  *
  * Reconstitue, en un seul fil chronologique, ce qui s'est passé dans
  * l'association : cotisations tranchées, sanctions, demandes de dépense,
- * décaissements, publication du règlement, solde d'ouverture.
+ * décaissements, publication du règlement, solde d'ouverture, et depuis le
+ * LOT 4 les mises à l'écart et les réintégrations.
  *
  * C'est une vue de REDEVABILITÉ : elle dit qui a fait quoi, et quand. D'où la
  * colonne « acteur », alimentée par les colonnes de traçabilité posées au
@@ -56,6 +57,8 @@ const TYPES = Object.freeze({
   demande_approuvee: 'Demande approuvée',
   demande_refusee: 'Demande refusée',
   decaissement: 'Décaissement',
+  membre_ecarte: 'Membre mis à l’écart',
+  membre_reintegre: 'Membre réintégré',
   reglement_publie: 'Règlement intérieur publié',
   solde_ouverture: 'Solde d’ouverture défini',
 });
@@ -158,7 +161,7 @@ routeur.get('/', async (requete, reponse) => {
                m.name AS membre,
                s.montant AS montant,
                s.motif AS detail,
-               'censeur' AS acteur,
+               COALESCE(s.inflige_par, 'censeur') AS acteur,
                NULL AS mois_du,
                NULL AS versement
           FROM sanctions s
@@ -191,7 +194,7 @@ routeur.get('/', async (requete, reponse) => {
                m.name AS membre,
                NULL AS montant,
                s.motif AS detail,
-               'censeur' AS acteur,
+               COALESCE(s.inflige_par, 'censeur') AS acteur,
                NULL AS mois_du,
                NULL AS versement
           FROM sanctions s
@@ -246,6 +249,26 @@ routeur.get('/', async (requete, reponse) => {
 
         UNION ALL
 
+        -- LOT 4 — mises à l'écart et réintégrations.
+        --
+        -- « members.statut » dit l'état courant, pas l'histoire : sans cette
+        -- table, une réintégration effaçait toute trace de la mise à l'écart
+        -- qui l'avait précédée, et la décision devenait injustifiable en
+        -- assemblée.
+        SELECT e.date_evenement AS date,
+               CASE WHEN e.type = 'mise_a_l_ecart' THEN 'membre_ecarte' ELSE 'membre_reintegre' END AS type,
+               m.name AS membre,
+               NULL AS montant,
+               e.motif AS detail,
+               e.acteur AS acteur,
+               NULL AS mois_du,
+               NULL AS versement
+          FROM evenements_membres e
+          JOIN members m ON m.id = e.member_id
+         WHERE strftime('%Y', e.date_evenement) = ?
+
+        UNION ALL
+
         -- Publication du règlement intérieur (jamais les fiches santé)
         SELECT o.date_depot AS date,
                'reglement_publie' AS type,
@@ -262,7 +285,10 @@ routeur.get('/', async (requete, reponse) => {
       ORDER BY date DESC
       LIMIT ?
       `,
-      [anneeTexte, anneeTexte, anneeTexte, anneeTexte, anneeTexte, anneeTexte, anneeTexte, anneeTexte, limite]
+      [
+        anneeTexte, anneeTexte, anneeTexte, anneeTexte, anneeTexte,
+        anneeTexte, anneeTexte, anneeTexte, anneeTexte, limite,
+      ]
     );
 
     const evenements = lignes.map((ligne) => {

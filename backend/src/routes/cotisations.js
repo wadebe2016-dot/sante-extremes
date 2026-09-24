@@ -29,6 +29,7 @@
 const express = require('express');
 const { executer, lireUne, lireToutes } = require('../db');
 const { exigerRole, memeMembre } = require('../middleware/auth');
+const { fenetreVersement } = require('../services/arrieres');
 const {
   recevoirJustificatif,
   recevoirRecu,
@@ -59,11 +60,19 @@ function normaliserMoyen(valeur) {
 }
 
 /**
- * Convertit un mois de rattrapage « AAAA-MM » en date de paiement.
+ * Convertit un mois de cotisation « AAAA-MM » en date de paiement.
  *
  * On retient le 5 du mois à 12:00Z : une date en milieu de journée et de
  * première semaine reste dans le bon mois quel que soit le fuseau de lecture,
  * là où le 1ᵉʳ à minuit basculerait sur le mois précédent à l'ouest de Greenwich.
+ *
+ * LOT 4 — LE MOIS SUIVANT EST ACCEPTÉ PENDANT LA FENÊTRE DE VERSEMENT.
+ *
+ * La cotisation du mois M se verse entre le 25 de M-1 et le 5 de M : à partir du
+ * 25 septembre, ce qu'on règle est la cotisation d'OCTOBRE. Le refus sec de tout
+ * mois à venir rendait donc impossible le versement le plus vertueux qui soit —
+ * celui fait dans les délais. Hors de cette fenêtre, le refus tient : on
+ * n'enregistre pas en mars un paiement pour décembre.
  *
  * @param {string} valeur mois demandé, au format AAAA-MM
  * @returns {{date: string}|{erreur: string}} date ISO à enregistrer, ou motif de refus
@@ -75,10 +84,10 @@ function convertirMoisEnDate(valeur) {
     return { erreur: 'Mois invalide (format attendu : AAAA-MM)' };
   }
 
-  const moisCourant = new Date().toISOString().slice(0, 7);
-  if (mois > moisCourant) {
-    // Comparaison lexicographique : le format AAAA-MM la rend équivalente à une
-    // comparaison chronologique.
+  // Comparaison lexicographique : le format AAAA-MM la rend équivalente à une
+  // comparaison chronologique.
+  const moisMaximal = fenetreVersement().mois_concerne;
+  if (mois > moisMaximal) {
     return { erreur: 'Impossible d’enregistrer un paiement pour un mois à venir' };
   }
 

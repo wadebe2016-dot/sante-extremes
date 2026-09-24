@@ -16,6 +16,12 @@
  * Le statut du mois se lit sur `date_paiement`, le MOIS DÛ — inchangé. La date de
  * remise de l'argent (`date_versement`) n'est ici qu'un détail d'affichage de la
  * sous-ligne : elle ne décide que de la trésorerie.
+ *
+ * LOT 4 : les membres MIS À L'ÉCART sortent de ce tableau. Le total « X/38 à
+ * jour » compte ceux qui sont tenus de cotiser ; y laisser un membre écarté
+ * ferait baisser le pourcentage pour une dette qu'il n'a plus à honorer le mois
+ * courant. Ils restent intégralement dans /api/historique, /api/arrieres et les
+ * exports : rien n'est perdu, la vue est seulement cadrée sur les actifs.
  */
 'use strict';
 
@@ -47,6 +53,9 @@ routeur.get('/', async (requete, reponse) => {
       FROM members m
       LEFT JOIN cotisations c
         ON c.member_id = m.id AND c.statut = 'validee'
+      -- COALESCE : une fiche antérieure au LOT 4 n'a pas encore de statut au
+      -- moment où la migration tourne ; elle est réputée active.
+      WHERE COALESCE(m.statut, 'actif') <> 'ecarte'
       GROUP BY m.id, m.name
       ORDER BY m.name COLLATE NOCASE ASC
     `);
@@ -149,6 +158,14 @@ routeur.get('/', async (requete, reponse) => {
       };
     });
 
+    // Les écartés ne sont pas dans la liste, mais l'application doit pouvoir
+    // dire « 38 actifs · 3 mis à l'écart » plutôt que de laisser croire à une
+    // disparition.
+    const comptes = await lireToutes(
+      `SELECT COUNT(*) AS ecartes FROM members WHERE COALESCE(statut, 'actif') = 'ecarte'`
+    );
+    const nombreEcartes = Number(comptes[0] ? comptes[0].ecartes : 0) || 0;
+
     const situation = await calculerSoldeReel();
     const nombreAJour = membres.filter((membre) => membre.paid).length;
     const moisCourant = new Date().toISOString().slice(0, 7); // format AAAA-MM
@@ -168,6 +185,8 @@ routeur.get('/', async (requete, reponse) => {
       en_attente: membres.filter((membre) => membre.statut_mois === 'en_attente').length,
       penalites_dues: membres.reduce((somme, membre) => somme + membre.penalite_due, 0),
       suspensions_actives: membres.filter((membre) => membre.suspendu).length,
+      // LOT 4 — hors du total ci-dessus, mais annoncés.
+      membres_ecartes: nombreEcartes,
     };
 
     console.log(

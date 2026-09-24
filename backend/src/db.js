@@ -91,6 +91,33 @@ function lireToutes(sql, parametres = []) {
  * départ aux lignes existantes.
  */
 const COLONNES_AJOUTEES = {
+  members: [
+    // LOT 4 — mois d'entrée dans l'association, point de départ de tout calcul
+    // d'arriéré. Sans elle, un membre entré en mai se voyait réclamer janvier à
+    // avril : quatre mois qu'il ne devait pas.
+    {
+      nom: 'date_adhesion',
+      definition: 'DATE',
+      // Remplissage UNIQUE, au moment même de l'ajout de la colonne. La
+      // première cotisation VALIDÉE d'un membre prouve qu'il était là ce
+      // mois-là ; à défaut, la création de sa fiche fait foi. « substr » plutôt
+      // que « strftime » : la valeur de départ ne doit dépendre d'aucune
+      // tolérance de format sur les dates déjà écrites.
+      apres: `UPDATE members SET date_adhesion = COALESCE(
+                (SELECT substr(MIN(c.date_paiement), 1, 7) || '-01'
+                   FROM cotisations c
+                  WHERE c.member_id = members.id AND c.statut = 'validee'),
+                substr(created_at, 1, 7) || '-01'
+              )`,
+    },
+    // LOT 4 — « mis à l'écart », jamais « radié ». Le CHECK vit dans
+    // schema.sql, pour les bases neuves : SQLite ne sait pas ajouter une
+    // contrainte à une table existante, et la liste fermée est tenue par
+    // src/routes/admin.js, qui refuse en 400 toute autre valeur.
+    { nom: 'statut', definition: "TEXT NOT NULL DEFAULT 'actif'" },
+    { nom: 'date_statut', definition: 'DATETIME' },
+    { nom: 'motif_statut', definition: 'TEXT' },
+  ],
   cotisations: [
     // L'existant est réputé validé : ces lignes ont été saisies par le trésorier.
     { nom: 'statut', definition: "TEXT NOT NULL DEFAULT 'validee'" },
@@ -115,6 +142,14 @@ const COLONNES_AJOUTEES = {
   sanctions: [
     // LOT 3 ter — qui a encaissé la pénalité
     { nom: 'encaisse_par', definition: 'TEXT' },
+    // LOT 4 — qui a prononcé la sanction. Le journal inscrivait « censeur »
+    // en dur ; depuis que les pénalités de retard s'appliquent par lots
+    // (POST /api/mesures/penalites), il faut le nom de celui qui a confirmé.
+    { nom: 'inflige_par', definition: 'TEXT' },
+    // LOT 4 — mois de cotisation à l'origine d'une pénalité de retard
+    // (AAAA-MM). C'est lui qui porte l'idempotence : un membre déjà pénalisé
+    // pour ce mois ne l'est pas une seconde fois.
+    { nom: 'mois_concerne', definition: 'TEXT' },
   ],
   demandes: [
     // LOT 3 ter — qui a approuvé ou refusé la demande
@@ -272,7 +307,9 @@ async function migrer() {
     throw erreur;
   }
 
-  console.log('[migration] schéma appliqué (members, cotisations, sanctions, documents)');
+  console.log(
+    '[migration] schéma appliqué (members, cotisations, sanctions, documents, evenements_membres)'
+  );
 }
 
 /** Ferme proprement la connexion (arrêt du serveur). */
