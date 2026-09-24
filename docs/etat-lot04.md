@@ -162,7 +162,7 @@ vigueur d'emblée, le champ libre servant aux exceptions.
 | `PATCH` vide | refus 400 | OK |
 | `PATCH` adhésion valide + contribution nulle | refus 400, **rien n'est écrit** | OK — fiche intacte |
 | `/api/stats` | porte la contribution de chaque membre | OK |
-| Feuille Excel « Arriérés » | colonne « Contribution » | OK |
+| Feuille Excel « Impayés » | colonne « Contribution » | OK |
 
 ---
 
@@ -229,22 +229,27 @@ un barème uniforme.
 
 `total_arrieres` ne compte **que** les cotisations : les pénalités restent une comptabilité
 distincte, annoncées à part dans `penalites_dues` et `total_du`. Les mêmes chiffres alimentent la
-feuille « Arriérés » du classeur Excel — elle appelle la fonction de la route, elle ne refait pas le
+feuille « Impayés » du classeur Excel — elle appelle la fonction de la route, elle ne refait pas le
 calcul.
 
 Le barème de base (10 000 XAF) vit dans `src/services/arrieres.js`, surchargeable par
 `COTISATION_MENSUELLE`. Il ne s'applique qu'aux membres sans contribution propre : voir la section
 A bis. **Rien à poser en production.**
 
-L'écran porte le surtitre **« Redevances »** — le terme employé par l'association — et le titre
-« Arriérés ». Le même libellé nomme la carte de l'onglet Plus et le raccourci de l'écran État.
+**L'écran s'appelle « Impayés »** — le terme retenu par l'association. Il nomme le bandeau, la carte
+de l'onglet Plus, le raccourci de l'écran État, le texte du bouton Partager et la feuille Excel.
 
-Application — écran « Arriérés » (onglet Plus, lecture publique) : bandeau avec le total et la
+Le CODE, lui, garde « arrieres » partout : route `/api/arrieres`, fichiers `arrieres_screen.dart` et
+`routes/arrieres.js`, fonction `construireArrieres`, clé JSON `total_arrieres`. Renommer l'un sans
+l'autre aurait cassé l'API pour un mot ; les deux vocabulaires cohabitent sans se gêner, celui de
+l'interface et celui du code.
+
+Application — écran « Impayés » (onglet Plus, lecture publique) : bandeau avec le total et la
 répartition 1 / 2 / 3 mois et plus ; liste par membre avec les mois dus en puces, le montant dû, la
 **contribution et la date d'adhésion en petit** (« 5 000/mois · adhésion mai 2026 ») — ce sont elles
 qui expliquent pourquoi l'un doit 15 000 et l'autre 80 000 — et la date du dernier versement ;
 filtres d'ancienneté ; « Partager » (texte brut, collé dans
-le groupe) et « Exporter » (Excel, feuille « Arriérés »).
+le groupe) et « Exporter » (Excel, feuille « Impayés »).
 
 ### Vérifications
 
@@ -256,7 +261,7 @@ le groupe) et « Exporter » (Excel, feuille « Arriérés »).
 | Pénalité due de 1 000 | hors de `total_arrieres`, dans `total_du` | OK — 10 000 / 1 000 / 11 000 |
 | Sans code | HTTP 200 | OK |
 | `?mois=septembre` | refus 400 | OK |
-| Feuille Excel « Arriérés » | mêmes chiffres que l'écran | OK — même fonction de construction |
+| Feuille Excel « Impayés » | mêmes chiffres que l'écran | OK — même fonction de construction |
 
 ---
 
@@ -420,7 +425,7 @@ d'arriérés sans ouvrir l'écran. C'est ce qui les distingue de trois boutons.
 | Carte | Icône | Chiffre | Libellé | Destination |
 | --- | --- | --- | --- | --- |
 | Séance | ballon | éligibles du jour | « peuvent jouer » | écran Séance |
-| Arriérés | alerte | total formaté (« 670 000 ») | « Redevances » | écran Arriérés |
+| Impayés | alerte | total formaté (« 670 000 ») | « Impayés » | écran Impayés |
 | Mesures | balance | à pénaliser + à écarter | « mesures à appliquer » | écran Mesures |
 
 **Avant la date d'effet**, la carte Mesures affiche un tiret grisé et « à partir du 6 oct » : rien

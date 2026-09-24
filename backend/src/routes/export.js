@@ -11,8 +11,11 @@
  * Le tableau des cotisations range les montants sur le MOIS DÛ — il ne change
  * pas. Le classeur Excel porte en plus une feuille « Versements » : la même
  * population, vue par date de remise de l'argent, régularisations signalées,
- * et depuis le LOT 4 une feuille « Arriérés » : qui doit quoi, et depuis quand,
- * avec la contribution mensuelle attendue de chacun — elle n'est pas uniforme.
+ * et depuis le LOT 4 une feuille « Impayés » : ce qui reste dû, avec la
+ * contribution mensuelle attendue de chacun — elle n'est pas uniforme.
+ *
+ * La feuille s'appelle « Impayés » mais le code garde le nom « arrieres » :
+ * fichier, route et clés JSON sont inchangés, seul le libellé a bougé.
  *
  * Les fiches santé n'apparaissent dans aucun export : ce sont des données de
  * santé, elles ne sortent jamais de l'écran du secrétariat.
@@ -309,7 +312,7 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
     feuilleVersements.getColumn(4).numFmt = '# ##0';
     feuilleVersements.getColumn(4).alignment = { horizontal: 'right' };
 
-    // --- Feuille 3 : arriérés ----------------------------------------------
+    // --- Feuille 3 : impayés -----------------------------------------------
     //
     // LOT 4. Les feuilles précédentes disent ce qui est ENTRÉ ; celle-ci dit ce
     // qui MANQUE. Les mois dus partent de la DATE D'ADHÉSION de chaque membre,
@@ -321,7 +324,7 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
     // appelle la fonction de la route, elle ne refait pas le calcul.
     const moisCible = moisArrieres(annee);
     const arrieres = await construireArrieres(moisCible);
-    const feuilleArrieres = classeur.addWorksheet('Arriérés');
+    const feuilleArrieres = classeur.addWorksheet('Impayés');
 
     feuilleArrieres.columns = [
       { header: 'Membre', key: 'membre', width: 28 },
@@ -362,7 +365,7 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
     }
 
     if (arrieres.membres.length === 0) {
-      feuilleArrieres.addRow(['Aucun arriéré : tous les membres sont à jour']);
+      feuilleArrieres.addRow(['Aucun impayé : tous les membres sont à jour']);
     }
 
     const ligneTotalArrieres = feuilleArrieres.addRow([
