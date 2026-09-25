@@ -128,12 +128,19 @@ const LIBELLE_PAYE_PAR = Object.freeze({
   avance_rembourse: 'Avance remboursée',
 });
 
-/** Dépenses décaissées sur l'année, du plus ancien au plus récent. */
+/**
+ * Dépenses décaissées sur l'année, du plus ancien au plus récent.
+ *
+ * UNE LIGNE PAR POSTE depuis le LOT 5 : un samedi à quatre postes donne quatre
+ * lignes, chacune avec sa catégorie et son montant. Le numéro de la demande
+ * d'origine les rattache les unes aux autres — sans lui, l'assemblée ne
+ * verrait plus qu'elles ont été engagées ensemble.
+ */
 function lireDepenses(annee) {
   return lireToutes(
-    `SELECT x.*, d.categorie, d.libelle
+    `SELECT x.*, l.categorie, l.libelle, l.demande_id
        FROM decaissements x
-       JOIN demandes d ON d.id = x.demande_id
+       JOIN demande_lignes l ON l.id = x.ligne_id
       WHERE strftime('%Y', x.date_paiement) = ?
       ORDER BY x.date_paiement ASC, x.id ASC`,
     [String(annee)]
@@ -482,6 +489,9 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
       { header: 'Bénéficiaire', key: 'beneficiaire', width: 24 },
       { header: 'Payé par', key: 'paye_par', width: 20 },
       { header: 'Décaissé par', key: 'decaisse_par', width: 22 },
+      // Le poste vient d'un besoin exprimé un jour donné : plusieurs lignes
+      // peuvent porter le même numéro, c'est ce qui les relie.
+      { header: 'Demande', key: 'demande', width: 12 },
     ];
 
     const enTeteDepenses = feuilleDepenses.getRow(1);
@@ -500,6 +510,7 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
         depense.beneficiaire || '',
         LIBELLE_PAYE_PAR[depense.paye_par] || depense.paye_par,
         depense.decaisse_par || '',
+        `#${depense.demande_id}`,
       ]);
     }
 
@@ -508,7 +519,9 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
     }
 
     const totalDepenses = depenses.reduce((somme, ligne) => somme + Number(ligne.montant), 0);
-    const ligneTotalDepenses = feuilleDepenses.addRow(['TOTAL', '', '', totalDepenses, '', '', '']);
+    const ligneTotalDepenses = feuilleDepenses.addRow([
+      'TOTAL', '', '', totalDepenses, '', '', '', '',
+    ]);
     ligneTotalDepenses.font = { bold: true };
     ligneTotalDepenses.eachCell((cellule) => {
       cellule.border = { top: { style: 'thin', color: { argb: 'FF1C1B1A' } } };
@@ -797,8 +810,12 @@ routeur.get('/historique.pdf', async (requete, reponse) => {
       .text(`Dépenses ${annee}`, document.page.margins.left, document.y);
     document.moveDown(0.5);
 
-    const colonnesDepenses = [70, 130, 240, 85, 130, 95];
-    const enTeteDepenses = ['Date', 'Catégorie', 'Libellé', 'Montant', 'Bénéficiaire', 'Payé par'];
+    // Le numéro de demande prend sa place sur la largeur du libellé : c'est lui
+    // qui relie les postes d'un même samedi.
+    const colonnesDepenses = [70, 128, 185, 85, 122, 90, 60];
+    const enTeteDepenses = [
+      'Date', 'Catégorie', 'Libellé', 'Montant', 'Bénéficiaire', 'Payé par', 'Demande',
+    ];
     dessinerLigne(document, enTeteDepenses, colonnesDepenses, { gras: true, fond: '#E6E3DD' });
 
     for (const depense of depenses) {
@@ -817,19 +834,24 @@ routeur.get('/historique.pdf', async (requete, reponse) => {
           formaterMontant(depense.montant),
           depense.beneficiaire || '·',
           LIBELLE_PAYE_PAR[depense.paye_par] || depense.paye_par,
+          `#${depense.demande_id}`,
         ],
         colonnesDepenses
       );
     }
 
     if (depenses.length === 0) {
-      dessinerLigne(document, ['Aucune dépense sur la période', '', '', '', '', ''], colonnesDepenses);
+      dessinerLigne(
+        document,
+        ['Aucune dépense sur la période', '', '', '', '', '', ''],
+        colonnesDepenses
+      );
     }
 
     const totalDepenses = depenses.reduce((somme, ligne) => somme + Number(ligne.montant), 0);
     dessinerLigne(
       document,
-      ['TOTAL', '', '', formaterMontant(totalDepenses), '', ''],
+      ['TOTAL', '', '', formaterMontant(totalDepenses), '', '', ''],
       colonnesDepenses,
       { gras: true, fond: '#1C1B1A' }
     );

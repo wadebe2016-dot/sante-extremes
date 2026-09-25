@@ -296,6 +296,130 @@ async function libererCategorieDemandes() {
   }
 }
 
+/**
+ * LOT 5 — Postes d'une demande : création de « demande_lignes », reprise des
+ * demandes existantes, et bascule de « decaissements » sur la ligne.
+ *
+ * C'est la seule migration du LOT 5, et elle est rejouable : chaque étape
+ * vérifie d'abord ce qui est déjà fait.
+ *
+ *   1. la table des lignes est créée si elle manque — schema.sql la créerait
+ *      aussi, mais il ne passe qu'APRÈS, et la reprise en a besoin tout de
+ *      suite ;
+ *   2. chaque demande sans ligne en reçoit UNE, copie exacte de ses propres
+ *      colonnes : catégorie, libellé, montant, statut, motif, décideur, date de
+ *      décision. Le statut agrégé d'une demande à une ligne est celui de cette
+ *      ligne : rien ne bouge à l'écran ;
+ *   3. « decaissements.demande_id » devient « decaissements.ligne_id ». SQLite ne
+ *      sait ni renommer une contrainte ni changer une clé étrangère : la table
+ *      est reconstruite, lignes recopiées une à une, dans une transaction et
+ *      clés étrangères désactivées le temps de l'échange. Les identifiants sont
+ *      conservés — un justificatif déjà servi par /api/decaissements/:id garde
+ *      son adresse.
+ *
+ * Sauvegarder data/sde.db avant de jouer cette migration : c'est la seule du
+ * projet qui réécrive une table de mouvements.
+ */
+async function migrerLignesDeDemande() {
+  const demandes = await colonnesDe('demandes');
+  if (demandes.length === 0) return; // base neuve : schema.sql fait tout
+
+  // 1. La table des lignes, avant toute reprise.
+  await executerScript(`
+    CREATE TABLE IF NOT EXISTS demande_lignes (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      demande_id     INTEGER NOT NULL,
+      categorie      TEXT NOT NULL,
+      libelle        TEXT NOT NULL,
+      montant_estime REAL NOT NULL CHECK (montant_estime > 0),
+      statut         TEXT NOT NULL DEFAULT 'en_attente'
+                       CHECK (statut IN ('en_attente', 'approuvee', 'refusee', 'payee')),
+      motif_refus    TEXT,
+      approuve_par   TEXT,
+      date_decision  TEXT,
+      FOREIGN KEY (demande_id) REFERENCES demandes (id) ON DELETE CASCADE
+    )
+  `);
+
+  // 2. Une ligne par demande qui n'en a pas encore. Le « NOT EXISTS » rend
+  //    l'opération rejouable : une demande déjà reprise est laissée en place.
+  const reprise = await executer(
+    `INSERT INTO demande_lignes
+       (demande_id, categorie, libelle, montant_estime, statut, motif_refus, approuve_par, date_decision)
+     SELECT d.id, d.categorie, d.libelle, d.montant_estime, d.statut,
+            d.motif_refus, d.approuve_par, d.date_decision
+       FROM demandes d
+      WHERE NOT EXISTS (SELECT 1 FROM demande_lignes l WHERE l.demande_id = d.id)`
+  );
+
+  if (reprise.changements > 0) {
+    console.log(`[migration] ${reprise.changements} demande(s) reprise(s) en une ligne`);
+  }
+
+  // 3. Bascule des décaissements sur la ligne.
+  const decaissements = await colonnesDe('decaissements');
+  if (decaissements.length === 0) return; // table absente : schema.sql la créera
+  if (decaissements.includes('ligne_id')) return; // déjà basculés
+
+  const orphelins = await lireUne(
+    `SELECT COUNT(*) AS nombre
+       FROM decaissements x
+      WHERE NOT EXISTS (SELECT 1 FROM demande_lignes l WHERE l.demande_id = x.demande_id)`
+  );
+
+  // Aucun décaissement ne devrait être orphelin : sa demande est obligatoire et
+  // sa suppression l'emporte en cascade. S'il en reste un, il serait perdu par
+  // la reconstruction — on refuse plutôt que d'effacer une sortie de caisse.
+  if (orphelins && Number(orphelins.nombre) > 0) {
+    throw new Error(
+      `${orphelins.nombre} décaissement(s) sans demande : reprise interrompue, base inchangée`
+    );
+  }
+
+  console.log('[migration] reconstruction de « decaissements » pour la bascule sur la ligne');
+
+  await executerScript('PRAGMA foreign_keys = OFF');
+  try {
+    await executerScript('BEGIN IMMEDIATE');
+    await executerScript(`
+      CREATE TABLE decaissements_nouveau (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        ligne_id            INTEGER NOT NULL UNIQUE,
+        montant             REAL NOT NULL CHECK (montant > 0),
+        date_paiement       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        moyen               TEXT NOT NULL CHECK (moyen IN ('Mobile Money', 'Espèce')),
+        paye_par            TEXT NOT NULL CHECK (paye_par IN ('caisse', 'avance_rembourse')),
+        beneficiaire        TEXT,
+        decaisse_par        TEXT,
+        justificatif_cle_s3 TEXT,
+        commentaire         TEXT,
+        FOREIGN KEY (ligne_id) REFERENCES demande_lignes (id) ON DELETE CASCADE
+      )
+    `);
+    await executerScript(`
+      INSERT INTO decaissements_nouveau
+        (id, ligne_id, montant, date_paiement, moyen, paye_par,
+         beneficiaire, decaisse_par, justificatif_cle_s3, commentaire)
+      SELECT x.id,
+             (SELECT l.id FROM demande_lignes l
+               WHERE l.demande_id = x.demande_id ORDER BY l.id LIMIT 1),
+             x.montant, x.date_paiement, x.moyen, x.paye_par,
+             x.beneficiaire, x.decaisse_par, x.justificatif_cle_s3, x.commentaire
+        FROM decaissements x
+    `);
+    await executerScript('DROP TABLE decaissements');
+    await executerScript('ALTER TABLE decaissements_nouveau RENAME TO decaissements');
+    await executerScript('COMMIT');
+    console.log('[migration] « decaissements » rattachés à leur ligne, identifiants préservés');
+  } catch (erreur) {
+    await executerScript('ROLLBACK').catch(() => {});
+    console.error(`[migration] bascule des décaissements impossible : ${erreur.message}`);
+    throw erreur;
+  } finally {
+    await executerScript('PRAGMA foreign_keys = ON');
+  }
+}
+
 /** Exécute un script SQL multi-instructions. */
 function executerScript(sql) {
   return new Promise((resoudre, rejeter) => {
@@ -326,6 +450,7 @@ async function migrer() {
   try {
     await completerColonnes();
     await libererCategorieDemandes();
+    await migrerLignesDeDemande();
     await executerScript(schema);
   } catch (erreur) {
     console.error(`[migration] échec de l'application du schéma : ${erreur.message}`);

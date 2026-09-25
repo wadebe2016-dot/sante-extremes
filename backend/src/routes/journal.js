@@ -7,6 +7,11 @@
  * décaissements, publication du règlement, solde d'ouverture, et depuis le
  * LOT 4 les mises à l'écart et les réintégrations.
  *
+ * LOT 5 — une demande à plusieurs postes donne UN « Besoin exprimé », qui
+ * annonce le nombre de postes et le total estimé, puis UN événement par poste
+ * approuvé, refusé ou payé : c'est poste par poste que le trésorier tranche,
+ * c'est poste par poste que le journal en rend compte.
+ *
  * C'est une vue de REDEVABILITÉ : elle dit qui a fait quoi, et quand. D'où la
  * colonne « acteur », alimentée par les colonnes de traçabilité posées au
  * LOT 3 ter (valide_par, encaisse_par, approuve_par, decaisse_par) et par
@@ -204,47 +209,57 @@ routeur.get('/', async (requete, reponse) => {
 
         UNION ALL
 
-        -- Besoins exprimés
+        -- Besoins exprimés. UN événement par demande, quel que soit le nombre
+        -- de postes : « Besoin exprimé — 3 postes, 18 000 estimés ». Le détail
+        -- poste par poste vient ensuite, à mesure des décisions.
         SELECT d.date_demande AS date,
                'demande_exprimee' AS type,
-               d.libelle AS membre,
-               d.montant_estime AS montant,
-               d.categorie AS detail,
+               CASE WHEN COUNT(l.id) > 1
+                    THEN COUNT(l.id) || ' postes'
+                    ELSE COALESCE(MIN(l.libelle), d.libelle) END AS membre,
+               COALESCE(SUM(l.montant_estime), d.montant_estime) AS montant,
+               CASE WHEN COUNT(l.id) > 1
+                    THEN NULL
+                    ELSE COALESCE(MIN(l.categorie), d.categorie) END AS detail,
                d.role_demandeur AS acteur,
                NULL AS mois_du,
                NULL AS versement
           FROM demandes d
+          LEFT JOIN demande_lignes l ON l.demande_id = d.id
          WHERE strftime('%Y', d.date_demande) = ?
+         GROUP BY d.id
 
         UNION ALL
 
-        -- Décisions du trésorier sur les demandes
-        SELECT d.date_decision AS date,
-               CASE WHEN d.statut = 'refusee' THEN 'demande_refusee' ELSE 'demande_approuvee' END AS type,
-               d.libelle AS membre,
-               d.montant_estime AS montant,
-               COALESCE(d.motif_refus, d.categorie) AS detail,
-               d.approuve_par AS acteur,
+        -- Décisions du trésorier, POSTE PAR POSTE (LOT 5) : il peut approuver
+        -- l'eau et refuser le kiné le même jour, et le journal doit montrer les
+        -- deux décisions, pas une moyenne des deux.
+        SELECT l.date_decision AS date,
+               CASE WHEN l.statut = 'refusee' THEN 'demande_refusee' ELSE 'demande_approuvee' END AS type,
+               l.libelle AS membre,
+               l.montant_estime AS montant,
+               COALESCE(l.motif_refus, l.categorie) AS detail,
+               l.approuve_par AS acteur,
                NULL AS mois_du,
                NULL AS versement
-          FROM demandes d
-         WHERE d.date_decision IS NOT NULL
-           AND d.statut IN ('approuvee', 'refusee', 'payee')
-           AND strftime('%Y', d.date_decision) = ?
+          FROM demande_lignes l
+         WHERE l.date_decision IS NOT NULL
+           AND l.statut IN ('approuvee', 'refusee', 'payee')
+           AND strftime('%Y', l.date_decision) = ?
 
         UNION ALL
 
-        -- Sorties de caisse
+        -- Sorties de caisse, une par poste payé
         SELECT x.date_paiement AS date,
                'decaissement' AS type,
-               d.libelle AS membre,
+               l.libelle AS membre,
                x.montant AS montant,
-               d.categorie AS detail,
+               l.categorie AS detail,
                x.decaisse_par AS acteur,
                NULL AS mois_du,
                NULL AS versement
           FROM decaissements x
-          JOIN demandes d ON d.id = x.demande_id
+          JOIN demande_lignes l ON l.id = x.ligne_id
          WHERE strftime('%Y', x.date_paiement) = ?
 
         UNION ALL

@@ -238,25 +238,30 @@ routeur.get('/', async (requete, reponse) => {
       [anneeTexte]
     );
 
-    // Demandes approuvées et non encore payées : l'argent est promis, il est
-    // encore en caisse mais ne doit pas être considéré comme disponible.
+    // POSTE PAR POSTE depuis le LOT 5. Une demande dont l'eau est approuvée et
+    // le kiné refusé n'engage que l'eau : compter la demande entière gonflerait
+    // l'engagé d'un montant que personne ne sortira jamais.
+    //
+    // « engagé » = postes approuvés NON PAYÉS. Un poste payé quitte
+    // l'engagement et entre dans les décaissements : le statut 'payee' ferme
+    // l'étape, il n'est donc pas à exclure en plus.
     const engage = await lireUne(
       `SELECT COALESCE(SUM(montant_estime), 0) AS somme, COUNT(*) AS nombre
-         FROM demandes
+         FROM demande_lignes
         WHERE statut = 'approuvee'`
     );
 
     const demandesEnAttente = await lireUne(
       `SELECT COALESCE(SUM(montant_estime), 0) AS somme, COUNT(*) AS nombre
-         FROM demandes
+         FROM demande_lignes
         WHERE statut = 'en_attente'`
     );
 
     const depensesParCategorie = await lireToutes(
-      `SELECT d.categorie, COALESCE(SUM(x.montant), 0) AS somme, COUNT(*) AS nombre
+      `SELECT l.categorie, COALESCE(SUM(x.montant), 0) AS somme, COUNT(*) AS nombre
          FROM decaissements x
-         JOIN demandes d ON d.id = x.demande_id
-        GROUP BY d.categorie
+         JOIN demande_lignes l ON l.id = x.ligne_id
+        GROUP BY l.categorie
         ORDER BY somme DESC`
     );
 
@@ -349,9 +354,9 @@ routeur.get('/', async (requete, reponse) => {
          FROM sanctions s JOIN members m ON m.id = s.member_id
         WHERE s.type = 'penalite' AND s.statut = 'reglee'
        UNION ALL
-       SELECT 'depense' AS nature, x.id, d.libelle AS membre, -x.montant AS montant, x.moyen,
-              x.date_paiement AS date, d.categorie AS motif
-         FROM decaissements x JOIN demandes d ON d.id = x.demande_id
+       SELECT 'depense' AS nature, x.id, l.libelle AS membre, -x.montant AS montant, x.moyen,
+              x.date_paiement AS date, l.categorie AS motif
+         FROM decaissements x JOIN demande_lignes l ON l.id = x.ligne_id
         ORDER BY date DESC
         LIMIT 20`
     );

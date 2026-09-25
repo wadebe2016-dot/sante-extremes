@@ -168,14 +168,54 @@ CREATE TABLE IF NOT EXISTS demandes (
 CREATE INDEX IF NOT EXISTS idx_demandes_statut ON demandes (statut);
 CREATE INDEX IF NOT EXISTS idx_demandes_date ON demandes (date_demande);
 
+-- ---------------------------------------------------------------------------
+-- LOT 5 — Postes d'une demande
+--
+-- Un samedi, l'intendant engage plusieurs postes à la fois : eau, kiné,
+-- location du stade, lavage des chasubles. Il exprime UN besoin ; le trésorier
+-- garde la main POSTE PAR POSTE — c'est lui qui engage l'argent, il doit
+-- pouvoir approuver l'eau et refuser le kiné.
+--
+-- D'où cette table : la décision et le paiement vivent sur la LIGNE, plus sur
+-- la demande. Les colonnes de « demandes » restent en place et portent
+-- désormais l'AGRÉGAT, recalculé par src/routes/demandes.js à chaque décision :
+--
+--   'en_attente'  au moins une ligne en attente
+--   'payee'       sinon, toutes les lignes non refusées sont payées
+--   'approuvee'   sinon, au moins une ligne approuvée
+--   'refusee'     sinon, toutes les lignes sont refusées
+--
+-- Une demande d'avant le LOT 5 porte exactement une ligne, créée par la
+-- migration à partir de ses propres colonnes : rien n'est perdu, et le statut
+-- agrégé d'une demande à une ligne est celui de cette ligne.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS demande_lignes (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  demande_id     INTEGER NOT NULL,
+  categorie      TEXT NOT NULL,
+  libelle        TEXT NOT NULL,
+  montant_estime REAL NOT NULL CHECK (montant_estime > 0),
+  statut         TEXT NOT NULL DEFAULT 'en_attente'
+                   CHECK (statut IN ('en_attente', 'approuvee', 'refusee', 'payee')),
+  motif_refus    TEXT,
+  approuve_par   TEXT,   -- trésorier ayant tranché CE poste
+  date_decision  TEXT,
+  FOREIGN KEY (demande_id) REFERENCES demandes (id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_demande_lignes_demande ON demande_lignes (demande_id);
+CREATE INDEX IF NOT EXISTS idx_demande_lignes_statut ON demande_lignes (statut);
+
 -- Sortie de caisse effective.
 --
--- La contrainte UNIQUE sur demande_id porte l'invariant : une demande ne peut
--- être payée qu'une fois. Le contrôle applicatif seul laisserait passer deux
--- requêtes simultanées.
+-- La contrainte UNIQUE sur ligne_id porte l'invariant : un POSTE ne peut être
+-- payé qu'une fois. Le contrôle applicatif seul laisserait passer deux requêtes
+-- simultanées. On décaisse toujours une ligne, jamais une demande : une demande
+-- à quatre postes donne lieu à quatre sorties de caisse distinctes, chacune
+-- avec son moyen, son bénéficiaire et son justificatif.
 CREATE TABLE IF NOT EXISTS decaissements (
   id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-  demande_id          INTEGER NOT NULL UNIQUE,
+  ligne_id            INTEGER NOT NULL UNIQUE,
   montant             REAL NOT NULL CHECK (montant > 0),
   date_paiement       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
   moyen               TEXT NOT NULL CHECK (moyen IN ('Mobile Money', 'Espèce')),
@@ -184,7 +224,7 @@ CREATE TABLE IF NOT EXISTS decaissements (
   decaisse_par        TEXT,   -- trésorier ayant sorti l'argent (LOT 3 ter)
   justificatif_cle_s3 TEXT,
   commentaire         TEXT,
-  FOREIGN KEY (demande_id) REFERENCES demandes (id) ON DELETE CASCADE
+  FOREIGN KEY (ligne_id) REFERENCES demande_lignes (id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_decaissements_date ON decaissements (date_paiement);

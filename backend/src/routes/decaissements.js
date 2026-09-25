@@ -9,7 +9,10 @@
  * rôles qui ont à en connaître, et n'est servi que par URL pré-signée.
  *
  * Aucune route de création ici : un décaissement naît uniquement de
- * POST /api/demandes/:id/decaisser, sur une demande approuvée.
+ * POST /api/demandes/:id/lignes/:ligneId/decaisser, sur un POSTE approuvé.
+ * Depuis le LOT 5, une sortie de caisse se rattache à un poste, pas à une
+ * demande : elle porte donc la catégorie et le libellé de ce poste, et rappelle
+ * le numéro de la demande d'origine.
  */
 'use strict';
 
@@ -35,9 +38,11 @@ routeur.get('/', async (requete, reponse) => {
 
   try {
     const lignes = await lireToutes(
-      `SELECT x.*, d.categorie, d.libelle, d.role_demandeur, d.montant_estime
+      `SELECT x.*, l.categorie, l.libelle, l.montant_estime, l.demande_id,
+              d.role_demandeur
          FROM decaissements x
-         JOIN demandes d ON d.id = x.demande_id
+         JOIN demande_lignes l ON l.id = x.ligne_id
+         JOIN demandes d ON d.id = l.demande_id
         ${annee === null ? '' : "WHERE strftime('%Y', x.date_paiement) = ?"}
         ORDER BY x.date_paiement DESC, x.id DESC`,
       annee === null ? [] : [String(annee)]
@@ -46,6 +51,7 @@ routeur.get('/', async (requete, reponse) => {
     const decaissements = lignes.map((ligne) => ({
       id: ligne.id,
       demande_id: ligne.demande_id,
+      ligne_id: ligne.ligne_id,
       categorie: ligne.categorie,
       categorie_libelle: CATEGORIES[ligne.categorie] || ligne.categorie,
       libelle: ligne.libelle,
