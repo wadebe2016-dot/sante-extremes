@@ -31,9 +31,16 @@ const routesTresorerie = require('./routes/tresorerie');
 const PORT = Number(process.env.PORT || 3000);
 const application = express();
 
-// L'application mobile n'est pas soumise au CORS ; la restriction ne concerne
-// que le tableau public consulté depuis un navigateur. CORS_ORIGINS accepte une
-// liste séparée par des virgules, « * » (défaut) laissant tout passer.
+// L'application Android n'est pas soumise au CORS : elle n'a pas d'origine.
+// La VERSION WEB, elle, en a une — https://app.santedesextremes.com — et le
+// navigateur refusera toute réponse de l'API tant qu'elle n'est pas déclarée
+// dans CORS_ORIGINS (liste séparée par des virgules ; « * » laisse tout
+// passer, ce qui reste le défaut pour un usage local).
+//
+// Une origine absente de la liste n'est pas REFUSÉE : la réponse part sans
+// l'en-tête « Access-Control-Allow-Origin », et c'est le navigateur qui la
+// jette. Vu du serveur, la requête aboutit — d'où l'importance de vérifier
+// l'EN-TÊTE, et non le code de retour, quand on éprouve la configuration.
 const originesAutorisees = (process.env.CORS_ORIGINS || '*')
   .split(',')
   .map((valeur) => valeur.trim())
