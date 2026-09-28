@@ -1,41 +1,68 @@
 /**
- * Authentification par codes de rôle — Santé des extrêmes.
+ * Authentification par codes de rôle — LOT 7 « DeuxZero ».
  *
- * L'association ne gère pas de comptes nominatifs : chaque fonction partage un
- * code, transmis en en-tête « Authorization: Bearer <code> ». Les codes ne sont
- * jamais écrits en dur, ils viennent de l'environnement :
+ * L'association ne gère pas de comptes nominatifs : chaque fonction du bureau a
+ * son code, transmis en en-tête « Authorization: Bearer <code> ». Ce qui change
+ * au LOT 7, c'est l'ENDROIT où ces codes vivent.
  *
- *   ADMIN_PASSWORD         admin        — tous les droits
- *   TRESORIERS             tresorier    — liste « Nom:code » (LOT 3 ter)
- *   SECRETAIRE_PASSWORD    secretaire   — membres, documents, demandes
- *   CENSEUR_PASSWORD       censeur      — sanctions
- *   INTENDANT_PASSWORD     intendant    — demandes de dépense
- *   COMPETITIONS_PASSWORD  competitions — demandes liées aux compétitions
+ * AVANT — dans le .env du serveur :
+ *   ADMIN_PASSWORD, TRESORIERS, SECRETAIRE_PASSWORD, CENSEUR_PASSWORD…
+ * Un seul jeu de codes, édité à la main par l'éditeur. Tenable pour UNE
+ * association ; impossible pour un produit vendu à des dizaines d'associations
+ * que l'éditeur ne rencontre jamais.
  *
- * LOT 3 ter — séparation des pouvoirs : les trésoriers ont désormais un code
- * NOMINATIF, ce qui permet de savoir qui a validé quoi et d'interdire à un
- * trésorier de traiter sa propre cotisation ou de se payer lui-même. Un contrôle
- * anonyme ne pourrait rien empêcher de tel.
+ * DEPUIS — dans la table « roles_codes » de la base de CHAQUE association,
+ * uniquement sous forme hachée, et distribués par le président depuis son
+ * téléphone (cf. src/services/roles.js).
  *
- * Le code admin ouvre toutes les routes : il n'a pas besoin d'être listé dans
- * les appels à exigerRole().
+ * Trois propriétés à ne pas casser :
+ *
+ *   1. COMPATIBILITÉ DU RÔLE. « admin » devient « président ». Les appels
+ *      exigerRole('admin') des lots précédents continuent de fonctionner, et
+ *      « requete.roles » contient les DEUX noms pour un président : cinq
+ *      contrôles existants testent encore « roles.includes('admin') ».
+ *
+ *   2. COMPATIBILITÉ DES CODES DISTRIBUÉS. Les codes du bureau de SDE001 sont
+ *      dans les téléphones des intéressés. Le script de migration les reprend en
+ *      base ; et si jamais il n'a pas tourné, le repli ci-dessous les accepte
+ *      encore et les reprend au passage. Aucun membre du bureau ne doit être
+ *      dérangé par ce lot.
+ *
+ *   3. LE PLAFOND D'ESSAIS S'APPLIQUE PAR ASSOCIATION. Les codes restent courts
+ *      et devinables un par un : le limiteur est ce qui les rend acceptables. Il
+ *      compte désormais par couple (association, adresse IP) — sans quoi une
+ *      association bloquée bloquerait toutes les autres derrière le même nginx.
  */
 'use strict';
 
 const crypto = require('crypto');
-const limiteur = require('./limiteur');
 
-/** Correspondance rôle → variable d'environnement portant son code. */
+const limiteur = require('./limiteur');
+const roles = require('../services/roles');
+const codes = require('../services/codes');
+
+/**
+ * Association dont les codes peuvent encore venir du .env.
+ *
+ * C'est « Santé des extrêmes », seule association existante avant ce lot. Le
+ * repli est strictement borné à elle : sans cette borne, les codes du .env
+ * ouvriraient N'IMPORTE QUELLE association, ce qui serait exactement la fuite
+ * que tout le lot cherche à rendre impossible.
+ */
+const ASSOCIATION_HISTORIQUE = String(process.env.ASSOCIATION_HISTORIQUE || 'SDE001').toUpperCase();
+
+/** Correspondance rôle → variable d'environnement, pour le seul repli historique. */
 const VARIABLES_PAR_ROLE = Object.freeze({
-  admin: 'ADMIN_PASSWORD',
-  tresorier: 'TRESORIER_PASSWORD', // repli historique, sans nom (cf. TRESORIERS)
+  president: 'ADMIN_PASSWORD', // le rôle s'appelait « admin »
+  tresorier: 'TRESORIER_PASSWORD', // repli sans nom (cf. TRESORIERS)
   secretaire: 'SECRETAIRE_PASSWORD',
   censeur: 'CENSEUR_PASSWORD',
   intendant: 'INTENDANT_PASSWORD',
   competitions: 'COMPETITIONS_PASSWORD',
 });
 
-const ROLES_CONNUS = Object.freeze(Object.keys(VARIABLES_PAR_ROLE));
+/** Rôles acceptés par exigerRole, « admin » compris pour les lots antérieurs. */
+const ROLES_CONNUS = Object.freeze([...roles.ROLES, 'admin']);
 
 /**
  * Comparaison à temps constant : la durée ne dépend pas du nombre de caractères
@@ -51,8 +78,9 @@ function comparerSecrets(recu, attendu) {
 /**
  * Analyse la variable TRESORIERS : « Nom du membre:code,Autre nom:code ».
  *
- * Les noms doivent correspondre exactement à ceux de la table members — c'est
- * sur cette égalité que reposent les refus « sa propre cotisation ».
+ * Conservée pour le seul repli historique. Les noms doivent correspondre
+ * exactement à ceux de la table members — c'est sur cette égalité que reposent
+ * les refus « sa propre cotisation ».
  *
  * @returns {Array<{nom: string, code: string}>}
  */
@@ -68,7 +96,7 @@ function listeTresoriers() {
       // Le nom peut contenir des espaces ; le code est après le DERNIER deux-points.
       const separateur = entree.lastIndexOf(':');
       if (separateur <= 0) {
-        console.warn(`[auth] entrée TRESORIERS ignorée, format « Nom:code » attendu`);
+        console.warn('[auth] entrée TRESORIERS ignorée, format « Nom:code » attendu');
         return null;
       }
       return {
@@ -79,7 +107,7 @@ function listeTresoriers() {
     .filter((tresorier) => tresorier && tresorier.nom && tresorier.code);
 }
 
-/** Noms des membres dont les sanctions relèvent de l'admin seul. */
+/** Noms des membres dont les sanctions relèvent du président seul. */
 function membresProteges() {
   return (process.env.CENSEUR_MEMBRES || '')
     .split(',')
@@ -103,9 +131,9 @@ function estMembreProtege(nom) {
 /**
  * Deux noms désignent-ils le même membre ?
  *
- * Comparaison insensible à la casse et aux espaces superflus : les noms de
- * TRESORIERS sont saisis à la main dans un .env, et une majuscule d'écart ne
- * doit pas laisser un trésorier valider sa propre cotisation.
+ * Comparaison insensible à la casse et aux espaces superflus : les noms sont
+ * saisis à la main, et une majuscule d'écart ne doit pas laisser un trésorier
+ * valider sa propre cotisation.
  */
 function memeMembre(a, b) {
   const gauche = String(a || '').trim().toLowerCase();
@@ -125,139 +153,269 @@ function extraireCode(requete) {
 }
 
 /**
- * Identifie un code : rôles obtenus, et nom du trésorier le cas échéant.
+ * Liste de rôles exposée à l'appelant, pour un rôle donné.
  *
- * Un même code peut être partagé par plusieurs fonctions : on renvoie donc une
- * liste. Un rôle dont la variable d'environnement n'est pas définie ne peut
- * jamais correspondre — sans quoi un code vide ouvrirait la porte.
- *
- * @param {string} code code reçu
- * @returns {{roles: string[], membre: string|null}}
+ * Un président reçoit « president » ET « admin » : le second est l'ancien nom, et
+ * plusieurs contrôles du code — sanctions sur un membre protégé, pénalités —
+ * testent encore « roles.includes('admin') ». Les faire tous basculer d'un coup
+ * aurait été la façon la plus sûre d'ouvrir une brèche par étourderie.
  */
-function identifierCode(code) {
-  if (!code) return { roles: [], membre: null };
+function rolesExposes(role) {
+  return role === 'president' ? ['president', 'admin'] : [role];
+}
 
-  const roles = [];
-  let membre = null;
+/**
+ * Reprend en base un code encore présent dans le .env.
+ *
+ * Appelée au premier usage d'un code historique, elle rend le repli à usage
+ * unique : dès la première connexion, le code vit dans « roles_codes » et le
+ * .env n'est plus consulté pour lui. C'est la migration des codes qui se fait
+ * toute seule, même si le script n'a pas été joué.
+ */
+async function reprendreCodeHistorique(bd, { role, code, nomMembre }) {
+  try {
+    let membreId = null;
+    if (nomMembre) {
+      const membre = await bd.lireUne('SELECT id FROM members WHERE name = ? COLLATE NOCASE', [nomMembre]);
+      membreId = membre ? membre.id : null;
+      if (!membreId) {
+        console.warn(`[auth] reprise du code ${role} : membre « ${nomMembre} » introuvable en base`);
+      }
+    }
+
+    const empreinte = await codes.hacher(code);
+    await bd.executer(
+      `INSERT INTO roles_codes (role, membre_id, libelle, code_hash, temporaire, actif)
+       VALUES (?, ?, ?, ?, 0, 1)`,
+      [role, membreId, nomMembre || null, empreinte]
+    );
+    console.log(`[auth] code historique repris en base : ${role}${nomMembre ? ` — ${nomMembre}` : ''}`);
+  } catch (erreur) {
+    // Une reprise qui échoue ne doit pas refuser l'accès : le membre du bureau a
+    // présenté un code valable, le repli continuera de l'accepter.
+    console.error(`[auth] reprise du code ${role} impossible : ${erreur.message}`);
+  }
+}
+
+/**
+ * Repli historique : le code vient-il du .env de l'association d'origine ?
+ *
+ * @returns {Promise<object|null>} identification au même format que la base
+ */
+async function identifierParEnvironnement(bd, code, codeAssociation) {
+  if (String(codeAssociation || '').toUpperCase() !== ASSOCIATION_HISTORIQUE) return null;
 
   for (const [role, variable] of Object.entries(VARIABLES_PAR_ROLE)) {
     const attendu = process.env[variable];
+    // Un code vide ne doit jamais correspondre, sous peine d'ouvrir la porte.
     if (!attendu) continue;
-    if (comparerSecrets(code, attendu)) roles.push(role);
+    if (!comparerSecrets(code, attendu)) continue;
+
+    await reprendreCodeHistorique(bd, { role, code, nomMembre: null });
+    return { id: null, role, membre: null, temporaire: false, libelle: null, historique: true };
   }
 
-  // Trésoriers nominatifs : prioritaires sur le repli anonyme.
   for (const tresorier of listeTresoriers()) {
-    if (comparerSecrets(code, tresorier.code)) {
-      if (!roles.includes('tresorier')) roles.push('tresorier');
-      membre = tresorier.nom;
-      break;
-    }
+    if (!comparerSecrets(code, tresorier.code)) continue;
+
+    await reprendreCodeHistorique(bd, { role: 'tresorier', code, nomMembre: tresorier.nom });
+    return {
+      id: null,
+      role: 'tresorier',
+      membre: tresorier.nom,
+      temporaire: false,
+      libelle: tresorier.nom,
+      historique: true,
+    };
   }
 
-  return { roles, membre };
+  return null;
 }
 
 /**
- * Rôles auxquels correspond un code.
- * @returns {string[]} rôles correspondants, éventuellement vide
+ * Identifie un code dans une association.
+ *
+ * @param {object} bd connexion de l'association (requete.db)
+ * @param {string} code code présenté
+ * @param {string} [codeAssociation] code de l'association, pour le repli historique
+ * @returns {Promise<{id: number|null, role: string, roles: string[], membre: string|null,
+ *                    temporaire: boolean, expire_le: string|null, libelle: string|null}|null>}
  */
-function rolesDuCode(code) {
-  return identifierCode(code).roles;
+async function identifierCode(bd, code, codeAssociation) {
+  if (!code || !bd) return null;
+
+  const ligne = await roles.identifier(bd, code);
+  if (ligne) {
+    return {
+      id: ligne.id,
+      role: ligne.role,
+      roles: rolesExposes(ligne.role),
+      // Repli du nom sur le libellé : un code repris du .env porte le nom de son
+      // titulaire dans « libelle » quand aucune fiche de membre ne correspond.
+      // Sans ce repli, un trésorier historique perdrait son identité — et avec
+      // elle le refus de valider sa propre cotisation (LOT 3 ter).
+      membre: ligne.membre_nom || ligne.libelle || null,
+      temporaire: ligne.temporaire === 1,
+      expire_le: ligne.expire_le || null,
+      libelle: ligne.libelle || ligne.membre_nom || null,
+      historique: false,
+    };
+  }
+
+  const repli = await identifierParEnvironnement(bd, code, codeAssociation);
+  if (!repli) return null;
+  return { ...repli, roles: rolesExposes(repli.role), expire_le: null };
 }
 
 /**
- * Middleware exigeant l'un des rôles listés — le rôle admin étant toujours
- * accepté en plus.
+ * Fabrique un middleware de contrôle d'accès.
  *
- *   routeur.post('/', exigerRole('tresorier'), gestionnaire)
- *
- * En cas de succès :
- *   requete.roles     rôles reconnus pour ce code
- *   requete.tresorier nom du trésorier, ou null (admin, code anonyme, autre rôle)
- *   requete.agent     nom à inscrire dans les colonnes de traçabilité
- *
- * @param {...string} rolesAutorises rôles ouvrant l'accès à la route
- * @returns {Function} middleware Express
+ * @param {string[]} rolesAutorises rôles ouvrant l'accès
+ * @param {object} options
+ * @param {boolean} [options.temporaireAutorise] laisser passer un code temporaire
+ * @param {boolean} [options.toutRole] accepter n'importe quel rôle actif
  */
-function exigerRole(...rolesAutorises) {
+function construireControle(rolesAutorises, options = {}) {
+  const demandes = rolesAutorises.map((role) => roles.normaliserRole(role));
   const inconnus = rolesAutorises.filter((role) => !ROLES_CONNUS.includes(role));
   if (inconnus.length > 0) {
-    // Erreur de programmation : on la fait remonter au démarrage, pas en production.
+    // Erreur de programmation : elle doit tomber au démarrage, pas en production.
     throw new Error(`exigerRole : rôle inconnu « ${inconnus.join(', ')} »`);
   }
 
-  const acceptes = new Set([...rolesAutorises, 'admin']);
+  // Le président ouvre toutes les routes : il n'a pas à être listé partout.
+  const acceptes = new Set([...demandes, 'president']);
 
-  return function verifierAcces(requete, reponse, suite) {
-    const auMoinsUnCodeConfigure = [...acceptes].some((role) => {
-      if (role === 'tresorier') return process.env.TRESORIERS || process.env.TRESORIER_PASSWORD;
-      return process.env[VARIABLES_PAR_ROLE[role]];
-    });
-
-    if (!auMoinsUnCodeConfigure) {
-      const variables = [...acceptes]
-        .map((role) => (role === 'tresorier' ? 'TRESORIERS' : VARIABLES_PAR_ROLE[role]))
-        .join(' ou ');
-      console.error(`[auth] aucun code configuré (${variables}) : accès refusé sur ${requete.originalUrl}`);
+  return async function verifierAcces(requete, reponse, suite) {
+    if (!requete.db) {
+      // Le middleware d'association n'a pas tourné : jamais en production, mais
+      // un routeur monté par erreur hors de la chaîne ne doit pas ouvrir l'accès.
+      console.error(`[auth] aucune base résolue sur ${requete.method} ${requete.originalUrl}`);
       return reponse.status(500).json({ error: 'Configuration serveur incomplète' });
     }
 
-    const source = limiteur.sourceDe(requete);
+    const codeAssociation = requete.association ? requete.association.code : null;
+    // Le plafond d'essais compte par association : une association qui se fait
+    // marteler ne doit pas bloquer les autres derrière le même nginx.
+    const source = `${codeAssociation || 'sans'}|${limiteur.sourceDe(requete)}`;
 
-    // Les codes font six chiffres : le plafond d'essais s'applique ici aussi,
-    // sans quoi les routes protégées deviendraient l'oracle que /auth/verify
-    // n'est plus.
     if (limiteur.estBloquee(source)) {
       return limiteur.repondreBloque(reponse, source);
     }
 
     const code = extraireCode(requete);
     if (!code) {
-      console.warn(`[auth] en-tête Authorization manquant ou mal formé sur ${requete.method} ${requete.originalUrl}`);
+      console.warn(
+        `[auth] en-tête Authorization manquant ou mal formé sur ${requete.method} ${requete.originalUrl}`
+      );
       return reponse.status(401).json({ error: 'Code requis' });
     }
 
-    const { roles, membre } = identifierCode(code);
-    const autorises = roles.filter((role) => acceptes.has(role));
+    let identite;
+    try {
+      identite = await identifierCode(requete.db, code, codeAssociation);
+    } catch (erreur) {
+      console.error(`[auth] identification impossible : ${erreur.message}`);
+      return reponse.status(500).json({ error: 'Erreur interne du serveur' });
+    }
 
-    if (autorises.length === 0) {
-      // On ne dit jamais si le code est inconnu ou simplement insuffisant :
-      // la distinction renseignerait un attaquant sur la validité du code.
+    const autorise =
+      identite && (options.toutRole || identite.roles.some((role) => acceptes.has(role)));
+
+    if (!autorise) {
+      // On ne dit jamais si le code est inconnu ou simplement insuffisant : la
+      // distinction renseignerait un attaquant sur la validité du code.
       limiteur.enregistrerEchec(source, `rôle attendu : ${[...acceptes].join('|')}`);
       return reponse.status(401).json({ error: 'Code invalide ou droits insuffisants' });
     }
 
+    // Un code temporaire ouvre UNE seule porte : le choix du code personnel. Tant
+    // que ce choix n'est pas fait, aucun écran n'est accessible — c'est ce qui
+    // garantit que le président ne connaît pas le code définitif de son
+    // collaborateur, puisque le code qu'il a remis cesse d'exister.
+    if (identite.temporaire && !options.temporaireAutorise) {
+      console.warn(`[auth] code temporaire présenté sur ${requete.method} ${requete.originalUrl}`);
+      return reponse.status(403).json({
+        error: 'Choisissez votre code personnel avant d’accéder à l’application.',
+        code: 'code_personnel_requis',
+        role: identite.role,
+        role_id: identite.id,
+      });
+    }
+
     limiteur.reinitialiser(source);
-    requete.roles = roles;
-    requete.tresorier = membre;
-    // Traçabilité : le nom du trésorier, ou « admin » quand il agit lui-même.
-    requete.agent = membre || (roles.includes('admin') ? 'admin' : autorises[0]);
+    if (identite.id) await roles.marquerUtilisation(requete.db, identite.id);
+
+    requete.roles = identite.roles;
+    requete.roleId = identite.id;
+    requete.roleCourant = identite.role;
+    requete.codeTemporaire = identite.temporaire;
+    // Seul un trésorier nominatif interdit de traiter sa propre cotisation : un
+    // code de trésorier sans titulaire ne permet aucun contrôle de ce genre.
+    requete.tresorier = identite.role === 'tresorier' ? identite.membre : null;
+    // Traçabilité : le nom du titulaire, à défaut le rôle.
+    requete.agent = identite.membre || identite.libelle || identite.role;
 
     console.log(
-      `[auth] accès accordé (${autorises.join(', ')}${membre ? ` — ${membre}` : ''}) ` +
-        `sur ${requete.method} ${requete.originalUrl}`
+      `[auth] accès accordé (${identite.role}${identite.membre ? ` — ${identite.membre}` : ''}) ` +
+        `sur ${requete.method} ${requete.originalUrl} [${codeAssociation}]`
     );
     return suite();
   };
 }
 
 /**
- * Conservé pour compatibilité avec le LOT 1 : équivaut à exigerRole('admin').
- * @deprecated utiliser exigerRole('admin')
+ * Middleware exigeant l'un des rôles listés — le président étant toujours accepté.
+ *
+ *   routeur.post('/', exigerRole('tresorier'), gestionnaire)
+ *
+ * En cas de succès :
+ *   requete.roles        rôles reconnus (« admin » accompagne « president »)
+ *   requete.roleId       identifiant de la ligne roles_codes, ou null (repli .env)
+ *   requete.tresorier    nom du trésorier, ou null
+ *   requete.agent        nom à inscrire dans les colonnes de traçabilité
+ *
+ * @param {...string} rolesAutorises rôles ouvrant l'accès à la route
+ * @returns {Function} middleware Express
  */
-const verifierAdmin = exigerRole('admin');
+function exigerRole(...rolesAutorises) {
+  return construireControle(rolesAutorises);
+}
+
+/**
+ * Middleware acceptant tout titulaire de rôle actif, CODE TEMPORAIRE COMPRIS.
+ *
+ * Réservé à l'unique route accessible avec un code temporaire : le choix du code
+ * personnel. Partout ailleurs, un code temporaire est refusé en 403.
+ */
+function exigerTitulaireMemeTemporaire() {
+  return construireControle([], { temporaireAutorise: true, toutRole: true });
+}
+
+/** Middleware acceptant tout titulaire de rôle actif, code définitif exigé. */
+function exigerTitulaire() {
+  return construireControle([], { toutRole: true });
+}
+
+/**
+ * Conservé pour compatibilité avec le LOT 1 : équivaut à exigerRole('president').
+ * @deprecated utiliser exigerRole('president')
+ */
+const verifierAdmin = exigerRole('president');
 
 module.exports = {
   exigerRole,
+  exigerTitulaire,
+  exigerTitulaireMemeTemporaire,
   identifierCode,
-  rolesDuCode,
   extraireCode,
   listeTresoriers,
   membresProteges,
   estMembreProtege,
   memeMembre,
+  rolesExposes,
   verifierAdmin,
   ROLES_CONNUS,
   VARIABLES_PAR_ROLE,
+  ASSOCIATION_HISTORIQUE,
 };
