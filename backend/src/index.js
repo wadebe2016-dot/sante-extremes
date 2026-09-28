@@ -1,7 +1,20 @@
 /**
- * Serveur Express — Santé des extrêmes (LOT 1)
- * Expose les routes d'administration, d'enregistrement des cotisations
- * et le tableau public de suivi des paiements.
+ * Serveur Express — DeuxZero (LOT 7).
+ *
+ * L'application, mono-association jusqu'au LOT 6, devient un produit
+ * multi-associations. Deux changements structurent tout ce fichier :
+ *
+ *   1. UNE BASE PAR ASSOCIATION. Le middleware resoudreAssociation lit l'en-tête
+ *      « X-Association », ouvre la base correspondante et la pose sur
+ *      « requete.db ». Il est monté AVANT tous les routeurs métier : aucun d'eux
+ *      ne peut être atteint sans base résolue, et aucun ne détient de base
+ *      globale. L'étanchéité ne dépend donc pas de la discipline des requêtes
+ *      SQL, mais du fichier ouvert.
+ *
+ *   2. L'ÉDITEUR N'INTERVIENT JAMAIS. Trois routes sont publiques et sans
+ *      en-tête : créer une association, reconnaître un code, réinitialiser un
+ *      code perdu. C'est ce qui permet à une association de s'inscrire un samedi
+ *      matin et de travailler le samedi suivant sans appeler personne.
  */
 'use strict';
 
@@ -10,9 +23,15 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 
-const { migrer, fermerBd } = require('./db');
+const annuaire = require('./bd/annuaire');
+const locataires = require('./bd/locataires');
+const { resoudreAssociation } = require('./middleware/association');
+const { fournisseurActif } = require('./services/sms');
+
 const routesAdmin = require('./routes/admin');
+const routesAdminProduit = require('./routes/adminProduit');
 const routesArrieres = require('./routes/arrieres');
+const routesAssociations = require('./routes/associations');
 const routesAuth = require('./routes/auth');
 const routesCotisations = require('./routes/cotisations');
 const routesDecaissements = require('./routes/decaissements');
@@ -22,7 +41,10 @@ const routesExport = require('./routes/export');
 const routesHistorique = require('./routes/historique');
 const routesJournal = require('./routes/journal');
 const routesMesures = require('./routes/mesures');
+const routesParametres = require('./routes/parametres');
 const routesPenalites = require('./routes/penalites');
+const routesReinitialisation = require('./routes/reinitialisation');
+const routesRoles = require('./routes/roles');
 const routesSanctions = require('./routes/sanctions');
 const routesSeance = require('./routes/seance');
 const routesStats = require('./routes/stats');
@@ -49,6 +71,11 @@ const originesAutorisees = (process.env.CORS_ORIGINS || '*')
 application.use(
   cors({
     origin: originesAutorisees.includes('*') ? true : originesAutorisees,
+    // LOT 7 — sans cette ligne, le navigateur refuse la requête préalable et la
+    // version web ne peut plus joindre aucune route métier : « X-Association »
+    // n'est pas un en-tête que CORS autorise d'office.
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Association'],
+    exposedHeaders: ['Retry-After'],
   })
 );
 
@@ -57,21 +84,49 @@ application.set('trust proxy', true);
 application.use(express.json({ limit: '1mb' }));
 application.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
-// Journal d'accès minimal et structuré
+// Journal d'accès minimal et structuré. Le code d'association y figure : c'est le
+// seul moyen de démêler les journaux de plusieurs clients sur une même instance.
 application.use((requete, reponse, suite) => {
   const debut = Date.now();
   reponse.on('finish', () => {
-    console.log(`[http] ${requete.method} ${requete.originalUrl} → ${reponse.statusCode} (${Date.now() - debut} ms)`);
+    const association = requete.headers['x-association'] || '-';
+    console.log(
+      `[http] ${requete.method} ${requete.originalUrl} [${association}] → ` +
+        `${reponse.statusCode} (${Date.now() - debut} ms)`
+    );
   });
   suite();
 });
 
-// Sonde de santé (supervision / conteneur)
+// Sonde de santé (supervision / conteneur). Dispensée d'en-tête : elle interroge
+// le service, pas une association.
 application.get('/api/health', (requete, reponse) => {
-  reponse.status(200).json({ status: 'ok', service: 'sante-extremes-backend' });
+  reponse.status(200).json({
+    status: 'ok',
+    service: 'deuxzero-backend',
+    sms: fournisseurActif(),
+    bases_en_cache: locataires.tailleCache(),
+  });
 });
 
-// Routes publiques : consultation et exports, aucun code requis
+// ---------------------------------------------------------------------------
+// Résolution du locataire — AVANT tout routeur métier.
+//
+// Ce qui suit cette ligne ne peut plus être atteint sans « requete.db ». Les
+// quatre routes dispensées d'en-tête sont listées dans le middleware lui-même,
+// une par une, avec leur justification : c'est volontairement une liste fermée
+// et non un motif, pour qu'aucune route nouvelle ne s'y glisse par inadvertance.
+// ---------------------------------------------------------------------------
+application.use(resoudreAssociation);
+
+// Création d'association et reconnaissance d'un code : publiques et sans en-tête.
+application.use('/api/associations', routesAssociations);
+// Réinitialisation d'un code perdu : le demandeur n'a plus rien de configuré.
+application.use('/api/reinitialisation', routesReinitialisation);
+// Espace de l'éditeur, protégé par ADMIN_PRODUIT_CODE et sans donnée métier.
+application.use('/api/admin-produit', routesAdminProduit);
+
+// Routes publiques de l'association : consultation et exports, aucun code requis
 application.use('/api/stats', routesStats);
 application.use('/api/historique', routesHistorique);
 application.use('/api/journal', routesJournal);
@@ -95,6 +150,8 @@ application.use('/api/penalites', routesPenalites); // trésorier
 application.use('/api/sanctions', routesSanctions); // lecture publique, écriture censeur
 application.use('/api/demandes', routesDemandes); // lecture publique, écriture intendant/secrétaire/compétitions
 application.use('/api/documents', routesDocuments); // règlement public, fiches santé secrétaire
+application.use('/api/roles', routesRoles); // président : attribution et révocation des accès
+application.use('/api/parametres', routesParametres); // lecture tout rôle, écriture président
 
 // Route inconnue
 application.use((requete, reponse) => {
@@ -110,18 +167,67 @@ application.use((erreur, requete, reponse, suite) => {
 });
 
 /**
- * Applique la migration puis démarre l'écoute HTTP.
+ * Avertissements de configuration, au démarrage.
+ *
+ * Trois réglages peuvent être corrects en recette et dangereux en production. Les
+ * signaler au démarrage est le seul moment où quelqu'un les lit.
+ */
+function verifierConfiguration() {
+  const production = process.env.NODE_ENV === 'production';
+  const sms = fournisseurActif();
+
+  if (production && sms === 'journal') {
+    console.error(
+      '[serveur] ATTENTION : SMS_FOURNISSEUR=journal en production. AUCUN SMS NE PARTIRA — ' +
+        'les réinitialisations de code seront inopérantes et les codes apparaîtront dans les logs.'
+    );
+  }
+
+  if (!String(process.env.ADMIN_PRODUIT_CODE || '').trim()) {
+    console.warn(
+      "[serveur] ADMIN_PRODUIT_CODE absent : l'espace éditeur (/api/admin-produit) est fermé."
+    );
+  }
+
+  if (production && originesAutorisees.includes('*')) {
+    console.warn(
+      '[serveur] CORS_ORIGINS=* en production : toute origine web peut interroger l’API.'
+    );
+  }
+
+  console.log(`[serveur] routeur SMS : ${sms}`);
+}
+
+/**
+ * Prépare l'annuaire puis démarre l'écoute HTTP.
+ *
+ * Les bases d'association ne sont PAS migrées au démarrage : elles le sont à leur
+ * première requête, par le cache de locataires. Avec une association, la
+ * différence est nulle ; avec deux cents, elle fait la différence entre un
+ * redémarrage d'une seconde et un redémarrage d'une minute.
  */
 async function demarrer() {
+  verifierConfiguration();
+
   try {
-    await migrer();
+    await annuaire.obtenirAnnuaire();
+    const associations = await annuaire.lister();
+    console.log(`[serveur] annuaire prêt : ${associations.length} association(s) inscrite(s)`);
+    if (associations.length === 0) {
+      console.warn(
+        '[serveur] annuaire vide. Pour reprendre la base historique : ' +
+          'node scripts/migrer-vers-multi.js'
+      );
+    }
   } catch (erreur) {
-    console.error(`[serveur] migration impossible, arrêt : ${erreur.message}`);
+    console.error(`[serveur] annuaire inaccessible, arrêt : ${erreur.message}`);
     process.exit(1);
   }
 
   const serveur = application.listen(PORT, '0.0.0.0', () => {
-    console.log(`[serveur] Santé des extrêmes à l'écoute sur le port ${PORT} (${process.env.NODE_ENV || 'development'})`);
+    console.log(
+      `[serveur] DeuxZero à l'écoute sur le port ${PORT} (${process.env.NODE_ENV || 'development'})`
+    );
   });
 
   serveur.on('error', (erreur) => {
@@ -129,11 +235,12 @@ async function demarrer() {
     process.exit(1);
   });
 
-  // Arrêt propre (Docker envoie SIGTERM)
+  // Arrêt propre (systemd envoie SIGTERM)
   const arreter = (signal) => {
     console.log(`[serveur] signal ${signal} reçu, arrêt en cours`);
     serveur.close(async () => {
-      await fermerBd();
+      await locataires.fermerToutes();
+      await annuaire.fermerAnnuaire();
       console.log('[serveur] arrêté proprement');
       process.exit(0);
     });
@@ -147,6 +254,9 @@ process.on('unhandledRejection', (raison) => {
   console.error(`[serveur] promesse rejetée non gérée : ${raison}`);
 });
 
-demarrer();
+// Sous test, le fichier est requis pour son application Express seule : démarrer
+// une écoute réelle laisserait le processus de test ouvert indéfiniment.
+if (process.env.NODE_ENV !== 'test') demarrer();
 
 module.exports = application;
+module.exports.demarrer = demarrer;
