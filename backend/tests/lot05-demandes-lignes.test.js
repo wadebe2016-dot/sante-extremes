@@ -42,7 +42,15 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const express = require('express');
 
-const { executer, lireUne, lireToutes, migrer, fermerBd } = require('../src/db');
+const aide = require('./aide-lot07');
+
+// LOT 7 — la base n'est plus un singleton : elle est ouverte ici et posee sur
+// chaque requete par aide.injecter(). Les trois primitives gardent leur nom
+// pour que le corps des tests reste lisible a l'identique.
+let bd;
+const executer = (sql, parametres) => bd.executer(sql, parametres);
+const lireUne = (sql, parametres) => bd.lireUne(sql, parametres);
+const lireToutes = (sql, parametres) => bd.lireToutes(sql, parametres);
 
 let serveur;
 let base;
@@ -91,10 +99,11 @@ function decaisser(demande, poste, champs = {}) {
 
 test.before(async () => {
   fs.rmSync(CHEMIN_BD, { force: true });
-  await migrer();
+  bd = await aide.ouvrirBase(CHEMIN_BD);
 
   const application = express();
   application.use(express.json());
+  application.use(aide.injecter(bd));
   application.use('/api/demandes', require('../src/routes/demandes'));
   application.use('/api/decaissements', require('../src/routes/decaissements'));
   application.use('/api/tresorerie', require('../src/routes/tresorerie'));
@@ -107,7 +116,7 @@ test.before(async () => {
 
 test.after(async () => {
   await new Promise((resoudre) => serveur.close(resoudre));
-  await fermerBd();
+  await aide.fermerBase(bd);
   fs.rmSync(CHEMIN_BD, { force: true });
 });
 

@@ -22,7 +22,14 @@ process.env.DB_PATH = CHEMIN_BD;
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { executer, lireUne, lireToutes, migrer, fermerBd } = require('../src/db');
+const aide = require('./aide-lot07');
+
+// LOT 7 — la base n'est plus un singleton. Les trois primitives gardent leur
+// nom pour que le corps des tests reste lisible a l'identique.
+let bd;
+const executer = (sql, parametres) => bd.executer(sql, parametres);
+const lireUne = (sql, parametres) => bd.lireUne(sql, parametres);
+const lireToutes = (sql, parametres) => bd.lireToutes(sql, parametres);
 
 /** Recrée la table « cotisations » telle qu'elle était avant cette évolution. */
 async function poserBaseDAvant() {
@@ -71,14 +78,18 @@ async function poserBaseDAvant() {
   );
 }
 
+const { migrer } = require('../src/bd/migration');
+
 test.before(async () => {
-  fs.rmSync(CHEMIN_BD, { force: true });
+  // La base est ouverte SANS schéma : le test pose lui-même la table telle
+  // qu'elle était avant l'évolution, puis fait tourner la migration dessus.
+  bd = aide.ouvrirBrute(CHEMIN_BD);
   await poserBaseDAvant();
-  await migrer();
+  await migrer(bd);
 });
 
 test.after(async () => {
-  await fermerBd();
+  await aide.fermerBase(bd);
   fs.rmSync(CHEMIN_BD, { force: true });
 });
 
@@ -109,7 +120,7 @@ test('rejouer la migration ne réécrit rien', async () => {
 
   // Le service rejoue schema.sql à chaque démarrage : le remplissage, lui, est
   // attaché à l'ajout de la colonne et ne doit plus jamais repasser.
-  await migrer();
+  await migrer(bd);
 
   const ligne = await lireUne('SELECT date_versement FROM cotisations WHERE id = 1');
   assert.equal(ligne.date_versement, '2026-09-12T12:00:00Z');

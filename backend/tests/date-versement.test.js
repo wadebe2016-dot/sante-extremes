@@ -37,7 +37,15 @@ const assert = require('node:assert/strict');
 const express = require('express');
 const ExcelJS = require('exceljs');
 
-const { executer, lireUne, migrer, fermerBd } = require('../src/db');
+const aide = require('./aide-lot07');
+
+// LOT 7 — la base n'est plus un singleton : elle est ouverte ici et posee sur
+// chaque requete par aide.injecter(). Les trois primitives gardent leur nom
+// pour que le corps des tests reste lisible a l'identique.
+let bd;
+const executer = (sql, parametres) => bd.executer(sql, parametres);
+const lireUne = (sql, parametres) => bd.lireUne(sql, parametres);
+const lireToutes = (sql, parametres) => bd.lireToutes(sql, parametres);
 const { calculerSoldeReel } = require('../src/routes/tresorerie');
 const { construireHistorique } = require('../src/routes/historique');
 
@@ -118,9 +126,10 @@ async function saisirCotisation(champs) {
 
 test.before(async () => {
   fs.rmSync(CHEMIN_BD, { force: true });
-  await migrer();
+  bd = await aide.ouvrirBase(CHEMIN_BD);
 
   const application = express();
+  application.use(aide.injecter(bd));
   application.use('/api/cotisations', require('../src/routes/cotisations'));
   application.use('/api/historique', require('../src/routes/historique'));
   application.use('/api/stats', require('../src/routes/stats'));
@@ -134,7 +143,7 @@ test.before(async () => {
 
 test.after(async () => {
   await new Promise((resoudre) => serveur.close(resoudre));
-  await fermerBd();
+  await aide.fermerBase(bd);
   fs.rmSync(CHEMIN_BD, { force: true });
 });
 
@@ -159,7 +168,7 @@ test('versement du 12 avec une ouverture au 18 : hors caisse', async () => {
     validation: '2026-09-19T09:00:00Z', // validé après, sans que cela compte
   });
 
-  const situation = await calculerSoldeReel();
+  const situation = await calculerSoldeReel(bd);
 
   assert.equal(Number(situation.cotisations.nombre), 0);
   assert.equal(situation.solde, OUVERTURE);
@@ -174,7 +183,7 @@ test('versement du 18 avec une ouverture au 18 : compté', async () => {
     validation: '2026-09-19T09:00:00Z',
   });
 
-  const situation = await calculerSoldeReel();
+  const situation = await calculerSoldeReel(bd);
 
   assert.equal(Number(situation.cotisations.nombre), 1);
   assert.equal(Number(situation.cotisations.somme), 10000);
@@ -189,7 +198,7 @@ test('ligne ancienne sans date_versement : repli sur la validation, puis sur le 
   // Plus ancienne encore : ni versement, ni validation — il reste le mois dû.
   await ajouterCotisation({ montant: 3000, moisDu: '2026-09-25T12:00:00Z' });
 
-  const situation = await calculerSoldeReel();
+  const situation = await calculerSoldeReel(bd);
 
   assert.equal(Number(situation.cotisations.nombre), 2);
   assert.equal(situation.solde, OUVERTURE + 7000 + 3000);
@@ -202,7 +211,7 @@ test('sans solde d’ouverture, tout l’historique est compté', async () => {
     versement: '2020-01-06T12:00:00Z',
   });
 
-  const situation = await calculerSoldeReel();
+  const situation = await calculerSoldeReel(bd);
 
   assert.equal(situation.ouverture, null);
   assert.equal(situation.solde, 10000);
@@ -216,7 +225,7 @@ test('pénalité : la date de règlement fait foi, la date de sanction sert de r
   // disparaître dans le néant d'une comparaison sur NULL.
   await ajouterPenalite({ montant: 3000, dateSanction: '2026-08-02T10:00:00Z', dateReglement: null });
 
-  const situation = await calculerSoldeReel();
+  const situation = await calculerSoldeReel(bd);
 
   assert.equal(Number(situation.penalites.nombre), 1);
   assert.equal(situation.solde, OUVERTURE + 2000);
@@ -241,7 +250,7 @@ test('GET /api/historique reste rangé sur le mois dû, quel que soit le verseme
     validation: '2026-09-19T09:00:00Z',
   });
 
-  const direct = await construireHistorique(2026);
+  const direct = await construireHistorique(bd, 2026);
   const reponse = await fetch(`${base}/api/historique?annee=2026`);
   const servi = await reponse.json();
 

@@ -35,7 +35,9 @@ const assert = require('node:assert/strict');
 const express = require('express');
 const cors = require('cors');
 
-const { migrer, fermerBd } = require('../src/db');
+const aide = require('./aide-lot07');
+
+let bd;
 
 const ORIGINE_WEB = 'https://app.santedesextremes.com';
 
@@ -57,6 +59,10 @@ async function serveurAvec(corsOrigins) {
     cors({ origin: originesAutorisees.includes('*') ? true : originesAutorisees })
   );
   application.use(express.json());
+  // LOT 7 — « X-Association » doit figurer parmi les en-têtes autorisés, sinon
+  // le navigateur refuse la requête préalable et la version web ne peut plus
+  // joindre la moindre route métier.
+  application.use(aide.injecter(bd));
   application.use('/api/stats', require('../src/routes/stats'));
   application.use('/api/demandes', require('../src/routes/demandes'));
 
@@ -70,12 +76,11 @@ async function serveurAvec(corsOrigins) {
 }
 
 test.before(async () => {
-  fs.rmSync(CHEMIN_BD, { force: true });
-  await migrer();
+  bd = await aide.ouvrirBase(CHEMIN_BD);
 });
 
 test.after(async () => {
-  await fermerBd();
+  await aide.fermerBase(bd);
   fs.rmSync(CHEMIN_BD, { force: true });
 });
 

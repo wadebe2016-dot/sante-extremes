@@ -43,7 +43,15 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const express = require('express');
 
-const { executer, lireUne, migrer, fermerBd } = require('../src/db');
+const aide = require('./aide-lot07');
+
+// LOT 7 — la base n'est plus un singleton : elle est ouverte ici et posee sur
+// chaque requete par aide.injecter(). Les trois primitives gardent leur nom
+// pour que le corps des tests reste lisible a l'identique.
+let bd;
+const executer = (sql, parametres) => bd.executer(sql, parametres);
+const lireUne = (sql, parametres) => bd.lireUne(sql, parametres);
+const lireToutes = (sql, parametres) => bd.lireToutes(sql, parametres);
 const {
   DATE_EFFET_MESURES,
   COTISATION_MENSUELLE,
@@ -141,10 +149,11 @@ async function appeler(chemin, { methode = 'GET', code = null, corps = null } = 
 
 test.before(async () => {
   fs.rmSync(CHEMIN_BD, { force: true });
-  await migrer();
+  bd = await aide.ouvrirBase(CHEMIN_BD);
 
   const application = express();
   application.use(express.json());
+  application.use(aide.injecter(bd));
   application.use('/api/admin', require('../src/routes/admin'));
   application.use('/api/arrieres', require('../src/routes/arrieres'));
   application.use('/api/seance', require('../src/routes/seance'));
@@ -161,7 +170,7 @@ test.before(async () => {
 
 test.after(async () => {
   await new Promise((resoudre) => serveur.close(resoudre));
-  await fermerBd();
+  await aide.fermerBase(bd);
   fs.rmSync(CHEMIN_BD, { force: true });
 });
 
@@ -182,7 +191,7 @@ test('un membre adhérent en mai, à jour de mai et juin, doit trois mois — pa
   await cotiser(1, '2026-05');
   await cotiser(1, '2026-06');
 
-  const situation = await construireSituation(MOIS_REFERENCE);
+  const situation = await construireSituation(bd, MOIS_REFERENCE);
   const membre = situation.find((ligne) => ligne.id === 1);
 
   assert.equal(membre.adhesion, '2026-05');
@@ -194,7 +203,7 @@ test('un membre adhérent en mai, à jour de mai et juin, doit trois mois — pa
 test('corriger la date d’adhésion recalcule immédiatement les arriérés', async () => {
   await ajouterMembre(1, 'Adama Begam', '2026-01');
 
-  const avant = await construireArrieres(MOIS_REFERENCE);
+  const avant = await construireArrieres(bd, MOIS_REFERENCE);
   assert.equal(avant.membres[0].nb_mois, 9); // janvier à septembre
 
   const correction = await appeler('/api/admin/members/1', {
@@ -205,7 +214,7 @@ test('corriger la date d’adhésion recalcule immédiatement les arriérés', a
   assert.equal(correction.code, 200);
   assert.equal(correction.corps.date_adhesion, '2026-05-01');
 
-  const apres = await construireArrieres(MOIS_REFERENCE);
+  const apres = await construireArrieres(bd, MOIS_REFERENCE);
   assert.equal(apres.membres[0].nb_mois, 5); // mai à septembre
 });
 
@@ -235,7 +244,7 @@ test('sans cotisation, l’adhésion retombe sur le mois de création de la fich
   );
   await executer('UPDATE members SET date_adhesion = NULL WHERE id = 1');
 
-  const situation = await construireSituation(MOIS_REFERENCE);
+  const situation = await construireSituation(bd, MOIS_REFERENCE);
   assert.equal(situation[0].adhesion, '2026-08');
   assert.equal(situation[0].nb_mois, 2); // août et septembre
 });
@@ -279,7 +288,7 @@ test('le montant dû suit la contribution du membre, pas un barème uniforme', a
   await ajouterMembre(1, 'A Cinq Mille', '2026-07', 'actif', 5000);
   await ajouterMembre(2, 'A Dix Mille', '2026-07', 'actif', 10000);
 
-  const situation = await construireSituation(MOIS_REFERENCE);
+  const situation = await construireSituation(bd, MOIS_REFERENCE);
   const cinq = situation.find((ligne) => ligne.id === 1);
   const dix = situation.find((ligne) => ligne.id === 2);
 
@@ -296,7 +305,7 @@ test('le total des arriérés additionne des contributions différentes', async 
   await ajouterMembre(1, 'A Cinq Mille', '2026-09', 'actif', 5000);
   await ajouterMembre(2, 'A Dix Mille', '2026-09', 'actif', 10000);
 
-  const arrieres = await construireArrieres(MOIS_REFERENCE);
+  const arrieres = await construireArrieres(bd, MOIS_REFERENCE);
 
   // Un barème uniforme à 10 000 aurait annoncé 20 000.
   assert.equal(arrieres.resume.total_arrieres, 15000);
@@ -322,7 +331,7 @@ test('la feuille de séance et les mesures suivent la même contribution', async
   assert.equal(ligne.mois_dus, 4); // juillet à octobre
   assert.equal(ligne.montant_du, 20000); // 4 × 5 000, pas 4 × 10 000
 
-  const mesures = await construireMesures('2026-10', '2026-10-06');
+  const mesures = await construireMesures(bd, '2026-10', '2026-10-06');
   assert.equal(mesures.a_ecarter[0].montant_du, 20000);
   // La pénalité, elle, est forfaitaire : elle ne dépend pas de la contribution.
   assert.equal(mesures.a_ecarter.length, 1);
@@ -332,7 +341,7 @@ test('la pénalité reste forfaitaire quelle que soit la contribution', async ()
   await ajouterMembre(1, 'A Cinq Mille', '2026-10', 'actif', 5000);
   await ajouterMembre(2, 'A Dix Mille', '2026-10', 'actif', 10000);
 
-  const mesures = await construireMesures('2026-10', '2026-10-06');
+  const mesures = await construireMesures(bd, '2026-10', '2026-10-06');
 
   for (const ligne of mesures.a_penaliser) {
     assert.equal(ligne.penalite_proposee, 1000, `${ligne.name} doit 1 000 de pénalité`);
@@ -413,7 +422,7 @@ test('une contribution nulle ou aberrante est refusée', async () => {
 test('PATCH corrige la contribution, et le montant dû suit immédiatement', async () => {
   await ajouterMembre(1, 'Mal Renseigne', '2026-07', 'actif', 10000);
 
-  const avant = await construireArrieres(MOIS_REFERENCE);
+  const avant = await construireArrieres(bd, MOIS_REFERENCE);
   assert.equal(avant.membres[0].montant_du, 30000);
 
   const correction = await appeler('/api/admin/members/1', {
@@ -424,7 +433,7 @@ test('PATCH corrige la contribution, et le montant dû suit immédiatement', asy
   assert.equal(correction.code, 200);
   assert.equal(correction.corps.contribution, 5000);
 
-  const apres = await construireArrieres(MOIS_REFERENCE);
+  const apres = await construireArrieres(bd, MOIS_REFERENCE);
   assert.equal(apres.membres[0].montant_du, 15000);
 });
 
@@ -441,7 +450,7 @@ test('PATCH corrige les deux champs d’un coup', async () => {
   assert.equal(correction.corps.date_adhesion, '2026-08-01');
   assert.equal(correction.corps.contribution, 5000);
 
-  const apres = await construireArrieres(MOIS_REFERENCE);
+  const apres = await construireArrieres(bd, MOIS_REFERENCE);
   assert.equal(apres.membres[0].nb_mois, 2); // août et septembre
   assert.equal(apres.membres[0].montant_du, 10000); // 2 × 5 000
 });
@@ -486,7 +495,7 @@ test('le total des arriérés est la somme des montants dus des membres en retar
   await ajouterMembre(3, 'A Jour', '2026-09');
   await cotiser(3, '2026-09');
 
-  const arrieres = await construireArrieres(MOIS_REFERENCE);
+  const arrieres = await construireArrieres(bd, MOIS_REFERENCE);
 
   assert.equal(arrieres.resume.membres_en_retard, 2);
   assert.equal(arrieres.resume.membres_a_jour, 1);
@@ -503,7 +512,7 @@ test('les membres à jour ne figurent que dans le résumé, le tri est décroiss
   await ajouterMembre(3, 'A Jour', '2026-09');
   await cotiser(3, '2026-09');
 
-  const arrieres = await construireArrieres(MOIS_REFERENCE);
+  const arrieres = await construireArrieres(bd, MOIS_REFERENCE);
 
   assert.deepEqual(
     arrieres.membres.map((membre) => membre.name),
@@ -537,7 +546,7 @@ test('les pénalités dues sont annoncées à part du montant de cotisation', as
      VALUES (1, 'penalite', 'Retard', 1000, 'due', '2026-09-10T10:00:00Z')`
   );
 
-  const arrieres = await construireArrieres(MOIS_REFERENCE);
+  const arrieres = await construireArrieres(bd, MOIS_REFERENCE);
   const membre = arrieres.membres[0];
 
   assert.equal(membre.montant_du, COTISATION_MENSUELLE);
@@ -590,7 +599,7 @@ test('un versement en avance met le membre à jour et le sort des mesures', asyn
   assert.equal(seance.corps.eligibles.length, 1);
   assert.equal(seance.corps.eligibles[0].date_versement, '2026-09-28');
 
-  const mesures = await construireMesures('2026-10', '2026-10-06');
+  const mesures = await construireMesures(bd, '2026-10', '2026-10-06');
   assert.equal(mesures.a_penaliser.length, 0);
   assert.equal(mesures.a_ecarter.length, 0);
   assert.equal(mesures.peuvent_jouer.length, 1);
@@ -698,7 +707,7 @@ test('le barème : un mois → 1 000, deux mois → 2 000, trois mois → mise �
   await ajouterMembre(2, 'Deux Mois', '2026-09');
   await ajouterMembre(3, 'Trois Mois', '2026-08');
 
-  const mesures = await construireMesures('2026-10', '2026-10-06');
+  const mesures = await construireMesures(bd, '2026-10', '2026-10-06');
 
   assert.equal(mesures.applicable, true);
   assert.deepEqual(
@@ -748,12 +757,12 @@ test('un membre déjà pénalisé pour ce mois n’est plus proposé', async () 
     corps: { mois: '2026-10', member_ids: [1] },
   });
 
-  const mesures = await construireMesures('2026-10', '2026-10-06');
+  const mesures = await construireMesures(bd, '2026-10', '2026-10-06');
   assert.equal(mesures.a_penaliser.length, 0);
   assert.equal(mesures.resume.penalises_deja, 1);
 
   // Le mois suivant, il est de nouveau proposable : la pénalité porte un mois.
-  const suivant = await construireMesures('2026-11', '2026-11-06');
+  const suivant = await construireMesures(bd, '2026-11', '2026-11-06');
   assert.equal(suivant.a_penaliser.length, 1);
 });
 

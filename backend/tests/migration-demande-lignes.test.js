@@ -29,7 +29,15 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const express = require('express');
 
-const { executer, lireUne, lireToutes, migrer, fermerBd } = require('../src/db');
+const aide = require('./aide-lot07');
+
+// LOT 7 — la base n'est plus un singleton. Les trois primitives gardent leur
+// nom pour que le corps des tests reste lisible a l'identique.
+let bd;
+const executer = (sql, parametres) => bd.executer(sql, parametres);
+const lireUne = (sql, parametres) => bd.lireUne(sql, parametres);
+const lireToutes = (sql, parametres) => bd.lireToutes(sql, parametres);
+const { migrer } = require('../src/bd/migration');
 
 let serveur;
 let base;
@@ -173,13 +181,16 @@ async function chiffresDAvant() {
 }
 
 test.before(async () => {
-  fs.rmSync(CHEMIN_BD, { force: true });
+  // Base ouverte SANS schéma : le test pose la structure d'avant le LOT 5, relève
+  // ses chiffres, puis fait tourner la migration dessus.
+  bd = aide.ouvrirBrute(CHEMIN_BD);
   await poserBaseDAvant();
   reference = await chiffresDAvant();
-  await migrer();
+  await migrer(bd);
 
   const application = express();
   application.use(express.json());
+  application.use(aide.injecter(bd));
   application.use('/api/demandes', require('../src/routes/demandes'));
   application.use('/api/decaissements', require('../src/routes/decaissements'));
   application.use('/api/tresorerie', require('../src/routes/tresorerie'));
@@ -191,7 +202,7 @@ test.before(async () => {
 
 test.after(async () => {
   await new Promise((resoudre) => serveur.close(resoudre));
-  await fermerBd();
+  await aide.fermerBase(bd);
   fs.rmSync(CHEMIN_BD, { force: true });
 });
 
@@ -281,7 +292,7 @@ test('la liste des demandes reste lisible, chacune à un poste', async () => {
 });
 
 test('rejouer la migration ne duplique aucune ligne', async () => {
-  await migrer();
+  await migrer(bd);
 
   const lignes = await lireToutes('SELECT id FROM demande_lignes');
   assert.equal(lignes.length, 4);
