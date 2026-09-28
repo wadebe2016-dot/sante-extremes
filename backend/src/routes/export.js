@@ -29,7 +29,6 @@ const express = require('express');
 const ExcelJS = require('exceljs');
 const PDFDocument = require('pdfkit');
 
-const { lireToutes } = require('../db');
 const { construireHistorique, lireAnnee, MOIS } = require('./historique');
 const { CATEGORIES } = require('./demandes');
 const { calculerSoldeReel } = require('./tresorerie');
@@ -74,8 +73,8 @@ function formaterDate(valeur) {
  * Sanctions de l'année, tous statuts confondus sauf les annulées.
  * @param {number} annee année civile
  */
-function lireSanctions(annee) {
-  return lireToutes(
+function lireSanctions(bd, annee) {
+  return bd.lireToutes(
     `SELECT s.*, m.name AS member_name
        FROM sanctions s
        JOIN members m ON m.id = s.member_id
@@ -96,8 +95,8 @@ function lireSanctions(annee) {
  *
  * @param {number} annee année civile
  */
-function lireVersements(annee) {
-  return lireToutes(
+function lireVersements(bd, annee) {
+  return bd.lireToutes(
     `SELECT c.id, m.name AS member_name, c.date_paiement, c.date_versement,
             c.date_validation, c.montant, c.moyen, c.valide_par
        FROM cotisations c
@@ -136,8 +135,8 @@ const LIBELLE_PAYE_PAR = Object.freeze({
  * d'origine les rattache les unes aux autres — sans lui, l'assemblée ne
  * verrait plus qu'elles ont été engagées ensemble.
  */
-function lireDepenses(annee) {
-  return lireToutes(
+function lireDepenses(bd, annee) {
+  return bd.lireToutes(
     `SELECT x.*, l.categorie, l.libelle, l.demande_id
        FROM decaissements x
        JOIN demande_lignes l ON l.id = x.ligne_id
@@ -162,8 +161,8 @@ function lireDepenses(annee) {
  * @returns {Promise<{ouverture: object|null, cotisations: number,
  *                    penalites: number, depenses: number, solde: number}>}
  */
-async function calculerSolde() {
-  const situation = await calculerSoldeReel();
+async function calculerSolde(bd) {
+  const situation = await calculerSoldeReel(bd);
 
   return {
     ouverture: situation.ouverture,
@@ -212,8 +211,8 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
   const annee = lecture.annee;
 
   try {
-    const historique = await construireHistorique(annee);
-    const sanctions = await lireSanctions(annee);
+    const historique = await construireHistorique(requete.db, annee);
+    const sanctions = await lireSanctions(requete.db, annee);
 
     const classeur = new ExcelJS.Workbook();
     classeur.creator = 'Santé des extrêmes';
@@ -264,7 +263,7 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
     // Le tableau croisé range les montants sur leur MOIS DÛ ; il ne dit donc pas
     // quand l'argent est entré en caisse. Cette feuille le dit, ligne par ligne,
     // et signale les régularisations — un versement postérieur au mois couvert.
-    const versements = await lireVersements(annee);
+    const versements = await lireVersements(requete.db, annee);
     const feuilleVersements = classeur.addWorksheet(`Versements ${annee}`);
 
     feuilleVersements.columns = [
@@ -330,7 +329,7 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
     // Mêmes chiffres que GET /api/arrieres, par construction : la feuille
     // appelle la fonction de la route, elle ne refait pas le calcul.
     const moisCible = moisArrieres(annee);
-    const arrieres = await construireArrieres(moisCible);
+    const arrieres = await construireArrieres(requete.db, moisCible);
     const feuilleArrieres = classeur.addWorksheet('Impayés');
 
     feuilleArrieres.columns = [
@@ -478,7 +477,7 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
     feuillePenalites.getColumn(5).alignment = { horizontal: 'right' };
 
     // --- Feuille 5 : dépenses ----------------------------------------------
-    const depenses = await lireDepenses(annee);
+    const depenses = await lireDepenses(requete.db, annee);
     const feuilleDepenses = classeur.addWorksheet(`Dépenses ${annee}`);
 
     feuilleDepenses.columns = [
@@ -531,7 +530,7 @@ routeur.get('/historique.xlsx', async (requete, reponse) => {
     feuilleDepenses.getColumn(4).alignment = { horizontal: 'right' };
 
     // Ligne de solde, en fin de document : le même chiffre que l'écran Trésorerie.
-    const situation = await calculerSolde();
+    const situation = await calculerSolde(requete.db);
     feuilleDepenses.addRow([]);
 
     if (situation.ouverture) {
@@ -648,8 +647,8 @@ routeur.get('/historique.pdf', async (requete, reponse) => {
   const annee = lecture.annee;
 
   try {
-    const historique = await construireHistorique(annee);
-    const sanctions = await lireSanctions(annee);
+    const historique = await construireHistorique(requete.db, annee);
+    const sanctions = await lireSanctions(requete.db, annee);
 
     const document = new PDFDocument({
       size: 'A4',
@@ -798,7 +797,7 @@ routeur.get('/historique.pdf', async (requete, reponse) => {
       );
 
     // --- Page 3 : dépenses --------------------------------------------------
-    const depenses = await lireDepenses(annee);
+    const depenses = await lireDepenses(requete.db, annee);
 
     document.addPage();
     dessinerEnTete(document, annee);
@@ -857,7 +856,7 @@ routeur.get('/historique.pdf', async (requete, reponse) => {
     );
 
     // --- Ligne de solde, en fin de document ---------------------------------
-    const situation = await calculerSolde();
+    const situation = await calculerSolde(requete.db);
 
     document.moveDown(1);
     document

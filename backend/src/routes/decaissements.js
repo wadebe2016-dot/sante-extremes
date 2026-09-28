@@ -17,7 +17,6 @@
 'use strict';
 
 const express = require('express');
-const { lireUne, lireToutes } = require('../db');
 const { exigerRole } = require('../middleware/auth');
 const { urlPresignee } = require('../middleware/s3upload');
 const { CATEGORIES } = require('./demandes');
@@ -37,7 +36,7 @@ routeur.get('/', async (requete, reponse) => {
   }
 
   try {
-    const lignes = await lireToutes(
+    const lignes = await requete.db.lireToutes(
       `SELECT x.*, l.categorie, l.libelle, l.montant_estime, l.demande_id,
               d.role_demandeur
          FROM decaissements x
@@ -101,7 +100,7 @@ routeur.get(
     }
 
     try {
-      const decaissement = await lireUne(
+      const decaissement = await requete.db.lireUne(
         'SELECT id, justificatif_cle_s3 FROM decaissements WHERE id = ?',
         [identifiant]
       );

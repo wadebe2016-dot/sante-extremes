@@ -35,8 +35,8 @@
 'use strict';
 
 const express = require('express');
-const { executer, lireUne, lireToutes } = require('../db');
 const { exigerRole, memeMembre } = require('../middleware/auth');
+const { postesDepenses } = require('../services/parametres');
 const {
   recevoirRecu,
   televerserFichierPrive,
@@ -45,7 +45,33 @@ const {
 
 const routeur = express.Router();
 
-/** Catégories fermées : une liste libre rendrait toute statistique illisible. */
+/**
+ * Postes de dépense de l'association — LOT 7.
+ *
+ * La liste était fermée et écrite ici : « location de stade », « kiné et
+ * médical », « eau et collation ». Ce sont les postes de « Santé des extrêmes ».
+ * Une association qui loue un car chaque dimanche, ou qui paie un gardien de
+ * but, n'avait aucun moyen de l'enregistrer.
+ *
+ * La liste reste FERMÉE — une catégorie libre rendrait toute statistique
+ * illisible — mais c'est désormais le président qui la tient, depuis l'écran des
+ * paramètres. Les clés par défaut sont exactement celles d'avant le LOT 7 : les
+ * dépenses déjà enregistrées de SDE001 gardent leur libellé.
+ *
+ * @param {object} bd connexion de l'association
+ * @returns {object} { clé: libellé }
+ */
+function categoriesDe(bd) {
+  return postesDepenses(bd);
+}
+
+/**
+ * Liste historique, repli pour les appels sans base sous la main.
+ *
+ * Elle ne pilote plus rien : elle documente ce que la migration pose comme
+ * valeur par défaut, et sert de garde-fou si les paramètres d'une base
+ * restaurée d'une vieille sauvegarde étaient introuvables.
+ */
 const CATEGORIES = Object.freeze({
   equipement: 'Équipement',
   location_stade: 'Location de stade',
@@ -119,13 +145,18 @@ const SELECTION_LIGNES = `
     LEFT JOIN decaissements x ON x.ligne_id = l.id
 `;
 
-/** Met en forme un poste pour l'API. */
-function formaterLigne(ligne) {
+/**
+ * Met en forme un poste pour l'API.
+ *
+ * @param {object} ligne ligne de « demande_lignes »
+ * @param {object} [libelles] postes de dépense de l'association
+ */
+function formaterLigne(ligne, libelles = CATEGORIES) {
   return {
     id: ligne.id,
     demande_id: ligne.demande_id,
     categorie: ligne.categorie,
-    categorie_libelle: CATEGORIES[ligne.categorie] || ligne.categorie,
+    categorie_libelle: libelles[ligne.categorie] || ligne.categorie,
     libelle: ligne.libelle,
     montant_estime: Number(ligne.montant_estime),
     statut: ligne.statut,
@@ -155,8 +186,8 @@ function formaterLigne(ligne) {
  * decaissement) restent servis : une demande à un poste se lit exactement comme
  * avant, et rien de ce qui consomme l'API ne casse le jour du déploiement.
  */
-function formaterDemande(demande, lignes) {
-  const postes = lignes.map(formaterLigne);
+function formaterDemande(demande, lignes, libelles = CATEGORIES) {
+  const postes = lignes.map((ligne) => formaterLigne(ligne, libelles));
   const totalEstime = postes.reduce((somme, poste) => somme + poste.montant_estime, 0);
   const totalDecaisse = postes.reduce(
     (somme, poste) => somme + (poste.decaissement ? poste.decaissement.montant : 0),
@@ -169,7 +200,7 @@ function formaterDemande(demande, lignes) {
     categorie: premier ? premier.categorie : demande.categorie,
     categorie_libelle: premier
       ? premier.categorie_libelle
-      : CATEGORIES[demande.categorie] || demande.categorie,
+      : libelles[demande.categorie] || demande.categorie,
     libelle: demande.libelle,
     montant_estime: totalEstime,
     total_estime: totalEstime,
@@ -190,8 +221,8 @@ function formaterDemande(demande, lignes) {
 }
 
 /** Postes d'une demande, dans l'ordre de saisie. */
-function lireLignes(demandeId) {
-  return lireToutes(`${SELECTION_LIGNES} WHERE l.demande_id = ? ORDER BY l.id ASC`, [demandeId]);
+function lireLignes(bd, demandeId) {
+  return bd.lireToutes(`${SELECTION_LIGNES} WHERE l.demande_id = ? ORDER BY l.id ASC`, [demandeId]);
 }
 
 /**
@@ -204,8 +235,8 @@ function lireLignes(demandeId) {
  *
  * @returns {Promise<string>} le statut agrégé retenu
  */
-async function recalculerDemande(demandeId) {
-  const lignes = await lireToutes(
+async function recalculerDemande(bd, demandeId) {
+  const lignes = await bd.lireToutes(
     `SELECT statut, montant_estime, motif_refus, approuve_par, date_decision
        FROM demande_lignes WHERE demande_id = ? ORDER BY id ASC`,
     [demandeId]
@@ -229,7 +260,7 @@ async function recalculerDemande(demandeId) {
 
   // « montant_estime » porte un CHECK > 0 : une demande sans poste, qui ne peut
   // naître de l'API, garderait son montant plutôt que de faire échouer l'écriture.
-  await executer(
+  await bd.executer(
     `UPDATE demandes
         SET statut = ?, motif_refus = ?, approuve_par = ?, date_decision = ?,
             montant_estime = CASE WHEN ? > 0 THEN ? ELSE montant_estime END
@@ -247,6 +278,7 @@ async function recalculerDemande(demandeId) {
  * l'ordre dans lequel le trésorier a quelque chose à faire.
  */
 routeur.get('/', async (requete, reponse) => {
+  const categories = categoriesDe(requete.db);
   const statutDemande = requete.query.statut ? String(requete.query.statut).toLowerCase() : null;
   const anneeBrute = requete.query.annee;
 
@@ -263,7 +295,7 @@ routeur.get('/', async (requete, reponse) => {
   }
 
   try {
-    const entetes = await lireToutes(
+    const entetes = await requete.db.lireToutes(
       `SELECT d.* FROM demandes d
         ${annee === null ? '' : "WHERE strftime('%Y', d.date_demande) = ?"}`,
       annee === null ? [] : [String(annee)]
@@ -271,7 +303,7 @@ routeur.get('/', async (requete, reponse) => {
 
     // Une seule lecture des postes pour toute la liste : une requête par
     // demande ferait vingt allers-retours pour un écran.
-    const postes = await lireToutes(`${SELECTION_LIGNES} ORDER BY l.demande_id ASC, l.id ASC`);
+    const postes = await requete.db.lireToutes(`${SELECTION_LIGNES} ORDER BY l.demande_id ASC, l.id ASC`);
     const parDemande = new Map();
     for (const poste of postes) {
       if (!parDemande.has(poste.demande_id)) parDemande.set(poste.demande_id, []);
@@ -280,7 +312,7 @@ routeur.get('/', async (requete, reponse) => {
 
     const rang = { en_attente: 0, approuvee: 1, payee: 2, refusee: 3 };
     let demandes = entetes
-      .map((entete) => formaterDemande(entete, parDemande.get(entete.id) || []))
+      .map((entete) => formaterDemande(entete, parDemande.get(entete.id) || [], categories))
       .sort((a, b) => {
         const ecart = (rang[a.statut] ?? 9) - (rang[b.statut] ?? 9);
         if (ecart !== 0) return ecart;
@@ -322,7 +354,7 @@ routeur.get('/', async (requete, reponse) => {
       demandes,
       totaux,
       montants,
-      categories: CATEGORIES,
+      categories: categories,
       max_lignes: MAX_LIGNES,
     });
   } catch (erreur) {
@@ -334,6 +366,9 @@ routeur.get('/', async (requete, reponse) => {
 /**
  * Postes reçus, quelle que soit la forme employée.
  *
+ * Le second argument porte les postes autorisés de l'association : la liste est
+ * fermée, mais c'est celle du président, plus celle du code.
+ *
  * DEUX FORMES ACCEPTÉES, une seule attendue des applications à jour :
  *   - « lignes », tableau d'objets — en JSON dans le corps, ou en texte JSON
  *     dans un champ de formulaire (un envoi multipart ne transporte que du
@@ -343,9 +378,11 @@ routeur.get('/', async (requete, reponse) => {
  *     ornement : une version antérieure de l'application reste installée sur
  *     les téléphones le jour du déploiement.
  *
+ * @param {object} corps corps de la requete
+ * @param {object} categories postes de depense autorises de l'association
  * @returns {{lignes: Array<object>}|{erreur: string}}
  */
-function analyserLignes(corps) {
+function analyserLignes(corps, categories) {
   let brutes = corps ? corps.lignes : undefined;
 
   if (typeof brutes === 'string') {
@@ -390,9 +427,9 @@ function analyserLignes(corps) {
     const libelle = typeof brute.libelle === 'string' ? brute.libelle.trim() : '';
     const montant = Number.parseFloat(brute.montant_estime);
 
-    if (!Object.prototype.hasOwnProperty.call(CATEGORIES, categorie)) {
+    if (!Object.prototype.hasOwnProperty.call(categories, categorie)) {
       return {
-        erreur: `Poste ${rang} : catégorie invalide (attendu : ${Object.keys(CATEGORIES).join(', ')})`,
+        erreur: `Poste ${rang} : catégorie invalide (attendu : ${Object.keys(categories).join(', ')})`,
       };
     }
 
@@ -418,7 +455,7 @@ routeur.post(
     gererErreursUpload(erreur, requete, reponse, suite)
   ),
   async (requete, reponse) => {
-    const analyse = analyserLignes(requete.body);
+    const analyse = analyserLignes(requete.body, categoriesDe(requete.db));
     if (analyse.erreur) {
       return reponse.status(400).json({ error: analyse.erreur });
     }
@@ -453,28 +490,28 @@ routeur.post(
         cleDevis = depot.cle;
       }
 
-      const resultat = await executer(
+      const resultat = await requete.db.executer(
         `INSERT INTO demandes (categorie, libelle, montant_estime, urgence, justificatif_cle_s3, role_demandeur)
          VALUES (?, ?, ?, ?, ?, ?)`,
         [lignes[0].categorie, libelleEntete, total, urgence, cleDevis, roleDemandeur]
       );
 
       for (const ligne of lignes) {
-        await executer(
+        await requete.db.executer(
           `INSERT INTO demande_lignes (demande_id, categorie, libelle, montant_estime)
            VALUES (?, ?, ?, ?)`,
           [resultat.id, ligne.categorie, ligne.libelle, ligne.montant_estime]
         );
       }
 
-      const entete = await lireUne('SELECT * FROM demandes WHERE id = ?', [resultat.id]);
-      const postes = await lireLignes(resultat.id);
+      const entete = await requete.db.lireUne('SELECT * FROM demandes WHERE id = ?', [resultat.id]);
+      const postes = await lireLignes(requete.db, resultat.id);
 
       console.log(
         `[demandes] besoin exprimé : #${resultat.id} — ${lignes.length} poste(s) — ` +
           `${total} XAF estimés — ${urgence} — par ${roleDemandeur}`
       );
-      return reponse.status(201).json(formaterDemande(entete, postes));
+      return reponse.status(201).json(formaterDemande(entete, postes, categoriesDe(requete.db)));
     } catch (erreur) {
       console.error(`[demandes] création impossible : ${erreur.message}`);
       return reponse
@@ -485,13 +522,13 @@ routeur.post(
 );
 
 /** Charge une demande, ou répond 404. */
-async function chargerDemande(identifiant, reponse) {
+async function chargerDemande(bd, identifiant, reponse) {
   if (!Number.isInteger(identifiant) || identifiant <= 0) {
     reponse.status(400).json({ error: 'Identifiant de demande invalide' });
     return null;
   }
 
-  const ligne = await lireUne('SELECT * FROM demandes WHERE id = ?', [identifiant]);
+  const ligne = await bd.lireUne('SELECT * FROM demandes WHERE id = ?', [identifiant]);
   if (!ligne) {
     reponse.status(404).json({ error: 'Demande introuvable' });
     return null;
@@ -501,7 +538,7 @@ async function chargerDemande(identifiant, reponse) {
 
 /** Charge un poste de LA demande indiquée, ou répond 404. */
 async function chargerLigne(requete, reponse) {
-  const demande = await chargerDemande(Number.parseInt(requete.params.id, 10), reponse);
+  const demande = await chargerDemande(requete.db, Number.parseInt(requete.params.id, 10), reponse);
   if (!demande) return null;
 
   const identifiant = Number.parseInt(requete.params.ligneId, 10);
@@ -512,7 +549,7 @@ async function chargerLigne(requete, reponse) {
 
   // Le poste doit appartenir à la demande de l'URL : sans cette égalité, un
   // identifiant emprunté à une autre demande passerait.
-  const ligne = await lireUne(`${SELECTION_LIGNES} WHERE l.id = ? AND l.demande_id = ?`, [
+  const ligne = await requete.db.lireUne(`${SELECTION_LIGNES} WHERE l.id = ? AND l.demande_id = ?`, [
     identifiant,
     demande.id,
   ]);
@@ -526,11 +563,11 @@ async function chargerLigne(requete, reponse) {
 }
 
 /** Réponse commune aux décisions : la demande entière, postes compris. */
-async function repondreDemande(demandeId, reponse, code = 200) {
-  await recalculerDemande(demandeId);
-  const entete = await lireUne('SELECT * FROM demandes WHERE id = ?', [demandeId]);
-  const postes = await lireLignes(demandeId);
-  return reponse.status(code).json(formaterDemande(entete, postes));
+async function repondreDemande(bd, demandeId, reponse, code = 200) {
+  await recalculerDemande(bd, demandeId);
+  const entete = await bd.lireUne('SELECT * FROM demandes WHERE id = ?', [demandeId]);
+  const postes = await lireLignes(bd, demandeId);
+  return reponse.status(code).json(formaterDemande(entete, postes, categoriesDe(bd)));
 }
 
 /**
@@ -542,10 +579,10 @@ async function repondreDemande(demandeId, reponse, code = 200) {
  */
 routeur.post('/:id/approuver', exigerRole('tresorier'), async (requete, reponse) => {
   try {
-    const demande = await chargerDemande(Number.parseInt(requete.params.id, 10), reponse);
+    const demande = await chargerDemande(requete.db, Number.parseInt(requete.params.id, 10), reponse);
     if (!demande) return undefined;
 
-    const resultat = await executer(
+    const resultat = await requete.db.executer(
       `UPDATE demande_lignes
           SET statut = 'approuvee', motif_refus = NULL,
               approuve_par = ?,
@@ -559,7 +596,7 @@ routeur.post('/:id/approuver', exigerRole('tresorier'), async (requete, reponse)
     }
 
     console.log(`[demandes] approuvée : #${demande.id} — ${resultat.changements} poste(s)`);
-    return repondreDemande(demande.id, reponse);
+    return repondreDemande(requete.db, demande.id, reponse);
   } catch (erreur) {
     console.error(`[demandes] approbation impossible : ${erreur.message}`);
     return reponse.status(500).json({ error: "Impossible d'approuver la demande" });
@@ -575,10 +612,10 @@ routeur.post('/:id/refuser', exigerRole('tresorier'), async (requete, reponse) =
   }
 
   try {
-    const demande = await chargerDemande(Number.parseInt(requete.params.id, 10), reponse);
+    const demande = await chargerDemande(requete.db, Number.parseInt(requete.params.id, 10), reponse);
     if (!demande) return undefined;
 
-    const resultat = await executer(
+    const resultat = await requete.db.executer(
       `UPDATE demande_lignes
           SET statut = 'refusee', motif_refus = ?,
               approuve_par = ?,
@@ -592,7 +629,7 @@ routeur.post('/:id/refuser', exigerRole('tresorier'), async (requete, reponse) =
     }
 
     console.log(`[demandes] refusée : #${demande.id} — ${resultat.changements} poste(s) — ${motif}`);
-    return repondreDemande(demande.id, reponse);
+    return repondreDemande(requete.db, demande.id, reponse);
   } catch (erreur) {
     console.error(`[demandes] refus impossible : ${erreur.message}`);
     return reponse.status(500).json({ error: 'Impossible de refuser la demande' });
@@ -609,7 +646,7 @@ routeur.post('/:id/lignes/:ligneId/approuver', exigerRole('tresorier'), async (r
       return reponse.status(409).json({ error: `Ce poste est déjà « ${charge.ligne.statut} »` });
     }
 
-    await executer(
+    await requete.db.executer(
       `UPDATE demande_lignes
           SET statut = 'approuvee', motif_refus = NULL,
               approuve_par = ?,
@@ -621,7 +658,7 @@ routeur.post('/:id/lignes/:ligneId/approuver', exigerRole('tresorier'), async (r
     console.log(
       `[demandes] poste approuvé : #${charge.demande.id}/${charge.ligne.id} — ${charge.ligne.libelle}`
     );
-    return repondreDemande(charge.demande.id, reponse);
+    return repondreDemande(requete.db, charge.demande.id, reponse);
   } catch (erreur) {
     console.error(`[demandes] approbation de poste impossible : ${erreur.message}`);
     return reponse.status(500).json({ error: "Impossible d'approuver ce poste" });
@@ -648,7 +685,7 @@ routeur.post('/:id/lignes/:ligneId/refuser', exigerRole('tresorier'), async (req
       return reponse.status(409).json({ error: 'Ce poste est déjà refusé' });
     }
 
-    await executer(
+    await requete.db.executer(
       `UPDATE demande_lignes
           SET statut = 'refusee', motif_refus = ?,
               approuve_par = ?,
@@ -658,7 +695,7 @@ routeur.post('/:id/lignes/:ligneId/refuser', exigerRole('tresorier'), async (req
     );
 
     console.log(`[demandes] poste refusé : #${charge.demande.id}/${charge.ligne.id} — ${motif}`);
-    return repondreDemande(charge.demande.id, reponse);
+    return repondreDemande(requete.db, charge.demande.id, reponse);
   } catch (erreur) {
     console.error(`[demandes] refus de poste impossible : ${erreur.message}`);
     return reponse.status(500).json({ error: 'Impossible de refuser ce poste' });
@@ -674,7 +711,7 @@ routeur.post('/:id/lignes/:ligneId/refuser', exigerRole('tresorier'), async (req
  */
 routeur.delete('/:id', exigerRole(...ROLES_DEMANDEURS), async (requete, reponse) => {
   try {
-    const demande = await chargerDemande(Number.parseInt(requete.params.id, 10), reponse);
+    const demande = await chargerDemande(requete.db, Number.parseInt(requete.params.id, 10), reponse);
     if (!demande) return undefined;
 
     const roles = requete.roles || [];
@@ -682,7 +719,7 @@ routeur.delete('/:id', exigerRole(...ROLES_DEMANDEURS), async (requete, reponse)
 
     // Un seul poste déjà tranché suffit à figer la demande : le statut agrégé
     // n'est « en attente » que si AUCUNE décision n'est encore prise.
-    const postes = await lireToutes('SELECT statut FROM demande_lignes WHERE demande_id = ?', [
+    const postes = await requete.db.lireToutes('SELECT statut FROM demande_lignes WHERE demande_id = ?', [
       demande.id,
     ]);
     const intacte = postes.every((poste) => poste.statut === 'en_attente');
@@ -700,7 +737,7 @@ routeur.delete('/:id', exigerRole(...ROLES_DEMANDEURS), async (requete, reponse)
       return reponse.status(401).json({ error: 'Cette demande a été exprimée par un autre rôle' });
     }
 
-    await executer('DELETE FROM demandes WHERE id = ?', [demande.id]);
+    await requete.db.executer('DELETE FROM demandes WHERE id = ?', [demande.id]);
     console.log(`[demandes] retirée : #${demande.id}`);
     return reponse.status(200).json({ message: 'Demande retirée' });
   } catch (erreur) {
@@ -778,7 +815,7 @@ routeur.post(
         cleJustificatif = depot.cle;
       }
 
-      const resultat = await executer(
+      const resultat = await requete.db.executer(
         `INSERT INTO decaissements
            (ligne_id, montant, moyen, paye_par, beneficiaire, decaisse_par, justificatif_cle_s3, commentaire)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -794,13 +831,13 @@ routeur.post(
         ]
       );
 
-      await executer("UPDATE demande_lignes SET statut = 'payee' WHERE id = ?", [charge.ligne.id]);
+      await requete.db.executer("UPDATE demande_lignes SET statut = 'payee' WHERE id = ?", [charge.ligne.id]);
 
       console.log(
         `[decaissements] décaissement #${resultat.id} — demande #${charge.demande.id}, ` +
           `poste #${charge.ligne.id} — ${montant} XAF (${moyen}, ${payePar})`
       );
-      return repondreDemande(charge.demande.id, reponse, 201);
+      return repondreDemande(requete.db, charge.demande.id, reponse, 201);
     } catch (erreur) {
       // La contrainte UNIQUE est le dernier rempart si deux requêtes arrivent
       // en même temps sur le même poste.

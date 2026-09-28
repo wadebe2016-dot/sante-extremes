@@ -31,8 +31,7 @@
 
 const express = require('express');
 const {
-  COTISATION_MENSUELLE,
-  SEUIL_ECART,
+  reglagesDe,
   moisCourant,
   moisValide,
   construireSituation,
@@ -49,8 +48,9 @@ const routeur = express.Router();
  *
  * @param {string} mois mois de référence, AAAA-MM
  */
-async function construireArrieres(mois) {
-  const situation = await construireSituation(mois);
+async function construireArrieres(bd, mois) {
+  const reglages = reglagesDe(bd);
+  const situation = await construireSituation(bd, mois);
 
   const enRetard = situation
     .filter((membre) => membre.nb_mois > 0)
@@ -83,7 +83,7 @@ async function construireArrieres(mois) {
     par_anciennete: {
       '1_mois': enRetard.filter((membre) => membre.nb_mois === 1).length,
       '2_mois': enRetard.filter((membre) => membre.nb_mois === 2).length,
-      '3_mois_et_plus': enRetard.filter((membre) => membre.nb_mois >= SEUIL_ECART).length,
+      '3_mois_et_plus': enRetard.filter((membre) => membre.nb_mois >= reglages.seuilEcart).length,
     },
     nb_membres: situation.length,
     ecartes: situation.filter((membre) => membre.statut === 'ecarte').length,
@@ -93,7 +93,8 @@ async function construireArrieres(mois) {
   // attendu est propre à chaque membre et figure sur sa ligne.
   return {
     mois,
-    cotisation_mensuelle: COTISATION_MENSUELLE,
+    cotisation_mensuelle: reglages.contributionDefaut,
+    seuil_exclusion_mois: reglages.seuilEcart,
     membres: enRetard,
     resume,
   };
@@ -110,7 +111,7 @@ routeur.get('/', async (requete, reponse) => {
   }
 
   try {
-    const charge = await construireArrieres(mois);
+    const charge = await construireArrieres(requete.db, mois);
 
     console.log(
       `[arrieres] ${mois} servi : ${charge.resume.membres_en_retard} en retard, ` +

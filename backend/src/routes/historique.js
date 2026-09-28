@@ -11,7 +11,6 @@
 'use strict';
 
 const express = require('express');
-const { lireToutes } = require('../db');
 
 const routeur = express.Router();
 
@@ -46,14 +45,14 @@ function lireAnnee(valeur) {
  * @param {number} annee année civile
  * @returns {Promise<object>} charge utile de GET /api/historique
  */
-async function construireHistorique(annee) {
-  const membres = await lireToutes(
+async function construireHistorique(bd, annee) {
+  const membres = await bd.lireToutes(
     'SELECT id, name FROM members ORDER BY name COLLATE NOCASE ASC'
   );
 
   // Une seule requête agrégée plutôt qu'une par membre : la base est petite,
   // mais le tableau se recharge à chaque tirer-pour-rafraîchir.
-  const cumuls = await lireToutes(
+  const cumuls = await bd.lireToutes(
     `SELECT member_id,
               CAST(strftime('%m', date_paiement) AS INTEGER) AS mois,
               SUM(montant) AS total,
@@ -114,7 +113,7 @@ routeur.get('/', async (requete, reponse) => {
   }
 
   try {
-    const historique = await construireHistorique(lecture.annee);
+    const historique = await construireHistorique(requete.db, lecture.annee);
 
     console.log(
       `[historique] année ${historique.annee} servie : ${historique.nb_paiements} paiement(s), ` +

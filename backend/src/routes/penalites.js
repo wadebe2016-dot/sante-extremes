@@ -10,7 +10,6 @@
 'use strict';
 
 const express = require('express');
-const { executer, lireUne } = require('../db');
 const { exigerRole } = require('../middleware/auth');
 const {
   recevoirJustificatif,
@@ -60,7 +59,7 @@ routeur.post(
     }
 
     try {
-      const sanction = await lireUne(
+      const sanction = await requete.db.lireUne(
         `SELECT s.*, m.name AS member_name
            FROM sanctions s JOIN members m ON m.id = s.member_id
           WHERE s.id = ?`,
@@ -87,7 +86,7 @@ routeur.post(
         console.log(`[penalites] règlement sans justificatif pour la pénalité #${identifiant}`);
       }
 
-      await executer(
+      await requete.db.executer(
         `UPDATE sanctions
             SET statut = 'reglee',
                 date_reglement = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
@@ -98,7 +97,7 @@ routeur.post(
         [moyen, requete.agent, urlJustificatif, identifiant]
       );
 
-      const ligne = await lireUne(
+      const ligne = await requete.db.lireUne(
         `SELECT s.*, m.name AS member_name
            FROM sanctions s JOIN members m ON m.id = s.member_id
           WHERE s.id = ?`,

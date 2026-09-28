@@ -17,7 +17,6 @@
 'use strict';
 
 const express = require('express');
-const { executer, lireUne, lireToutes } = require('../db');
 const { exigerRole } = require('../middleware/auth');
 const { lireAnnee, MOIS } = require('./historique');
 
@@ -34,8 +33,8 @@ const CLE_OUVERTURE = 'solde_ouverture';
  * @returns {Promise<{montant: number, date: string, commentaire: string|null,
  *                    definit_par: string|null, date_maj: string}|null>}
  */
-async function lireSoldeOuverture() {
-  const ligne = await lireUne('SELECT valeur, definit_par, date_maj FROM parametres WHERE cle = ?', [
+async function lireSoldeOuverture(bd) {
+  const ligne = await bd.lireUne('SELECT valeur, definit_par, date_maj FROM parametres WHERE cle = ?', [
     CLE_OUVERTURE,
   ]);
   if (!ligne || !ligne.valeur) return null;
@@ -76,8 +75,8 @@ async function lireSoldeOuverture() {
  *
  * @returns {Promise<object>} solde, ouverture et detail des composantes
  */
-async function calculerSoldeReel() {
-  const ouverture = await lireSoldeOuverture();
+async function calculerSoldeReel(bd) {
+  const ouverture = await lireSoldeOuverture(bd);
   const depuis = ouverture ? ouverture.date : null;
 
   // TROIS DATES, TROIS USAGES. « date_paiement » porte le MOIS DÛ : une
@@ -98,7 +97,7 @@ async function calculerSoldeReel() {
   // Comparaison de chaînes : les dates sont en AAAA-MM-JJ, éventuellement
   // suivies de l'heure (« 2026-09-18T12:00:00Z »). L'ordre lexicographique reste
   // chronologique, et un versement le jour même de l'ouverture est compté.
-  const cotisations = await lireUne(
+  const cotisations = await bd.lireUne(
     `SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre
        FROM cotisations
       WHERE statut = 'validee'
@@ -109,7 +108,7 @@ async function calculerSoldeReel() {
   // Même logique pour les pénalités : « date_reglement » est l'entrée en caisse,
   // et une pénalité réglée sans date connue retombe sur sa date de sanction
   // plutôt que de disparaître du solde.
-  const penalites = await lireUne(
+  const penalites = await bd.lireUne(
     `SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre
        FROM sanctions
       WHERE type = 'penalite' AND statut = 'reglee'
@@ -117,7 +116,7 @@ async function calculerSoldeReel() {
     depuis ? [depuis] : []
   );
 
-  const decaissements = await lireUne(
+  const decaissements = await bd.lireUne(
     `SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre
        FROM decaissements
       ${depuis ? 'WHERE date_paiement >= ?' : ''}`,
@@ -175,7 +174,7 @@ routeur.put('/solde-ouverture', exigerRole('tresorier'), async (requete, reponse
     // requete.agent : nom du trésorier nominatif, sinon « admin » ou le rôle.
     const acteur = requete.agent || 'admin';
 
-    await executer(
+    await requete.db.executer(
       `INSERT INTO parametres (cle, valeur, definit_par, date_maj)
        VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
        ON CONFLICT (cle) DO UPDATE
@@ -186,7 +185,7 @@ routeur.put('/solde-ouverture', exigerRole('tresorier'), async (requete, reponse
     );
 
     console.log(`[tresorerie] solde d'ouverture fixé par ${acteur} : ${montant} XAF au ${date}`);
-    return reponse.status(200).json(await lireSoldeOuverture());
+    return reponse.status(200).json(await lireSoldeOuverture(requete.db));
   } catch (erreur) {
     console.error(`[tresorerie] enregistrement du solde d'ouverture : ${erreur.message}`);
     return reponse.status(500).json({ error: 'Impossible d’enregistrer le solde d’ouverture' });
@@ -206,21 +205,21 @@ routeur.get('/', async (requete, reponse) => {
     // LOT 3 ter — le solde d'ouverture fixe le point de départ : seuls les
     // mouvements postérieurs s'y ajoutent. Sans lui, on additionne tout
     // l'historique, exactement comme avant.
-    const situation = await calculerSoldeReel();
+    const situation = await calculerSoldeReel(requete.db);
     const ouverture = situation.ouverture;
     const depuis = ouverture ? ouverture.date : null;
     const cotisationsTotal = situation.cotisations;
     const penalitesTotal = situation.penalites;
 
     // --- Encaissements de l'année demandée --------------------------------
-    const cotisationsAnnee = await lireUne(
+    const cotisationsAnnee = await requete.db.lireUne(
       `SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre
          FROM cotisations
         WHERE statut = 'validee' AND strftime('%Y', date_paiement) = ?`,
       [anneeTexte]
     );
 
-    const penalitesAnnee = await lireUne(
+    const penalitesAnnee = await requete.db.lireUne(
       `SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre
          FROM sanctions
         WHERE type = 'penalite' AND statut = 'reglee'
@@ -231,7 +230,7 @@ routeur.get('/', async (requete, reponse) => {
     // --- Sorties de caisse ------------------------------------------------
     const decaissementsTotal = situation.decaissements;
 
-    const decaissementsAnnee = await lireUne(
+    const decaissementsAnnee = await requete.db.lireUne(
       `SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre
          FROM decaissements
         WHERE strftime('%Y', date_paiement) = ?`,
@@ -245,19 +244,19 @@ routeur.get('/', async (requete, reponse) => {
     // « engagé » = postes approuvés NON PAYÉS. Un poste payé quitte
     // l'engagement et entre dans les décaissements : le statut 'payee' ferme
     // l'étape, il n'est donc pas à exclure en plus.
-    const engage = await lireUne(
+    const engage = await requete.db.lireUne(
       `SELECT COALESCE(SUM(montant_estime), 0) AS somme, COUNT(*) AS nombre
          FROM demande_lignes
         WHERE statut = 'approuvee'`
     );
 
-    const demandesEnAttente = await lireUne(
+    const demandesEnAttente = await requete.db.lireUne(
       `SELECT COALESCE(SUM(montant_estime), 0) AS somme, COUNT(*) AS nombre
          FROM demande_lignes
         WHERE statut = 'en_attente'`
     );
 
-    const depensesParCategorie = await lireToutes(
+    const depensesParCategorie = await requete.db.lireToutes(
       `SELECT l.categorie, COALESCE(SUM(x.montant), 0) AS somme, COUNT(*) AS nombre
          FROM decaissements x
          JOIN demande_lignes l ON l.id = x.ligne_id
@@ -266,20 +265,20 @@ routeur.get('/', async (requete, reponse) => {
     );
 
     // --- Sommes attendues, pas encore en caisse ---------------------------
-    const penalitesDues = await lireUne(
+    const penalitesDues = await requete.db.lireUne(
       `SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre
          FROM sanctions
         WHERE type = 'penalite' AND statut = 'due'`
     );
 
-    const declarationsEnAttente = await lireUne(
+    const declarationsEnAttente = await requete.db.lireUne(
       `SELECT COALESCE(SUM(montant), 0) AS somme, COUNT(*) AS nombre
          FROM cotisations
         WHERE statut = 'en_attente'`
     );
 
     // --- Répartition mensuelle de l'année ---------------------------------
-    const decaissementsParMois = await lireToutes(
+    const decaissementsParMois = await requete.db.lireToutes(
       `SELECT CAST(strftime('%m', date_paiement) AS INTEGER) AS mois,
               COALESCE(SUM(montant), 0) AS somme
          FROM decaissements
@@ -288,7 +287,7 @@ routeur.get('/', async (requete, reponse) => {
       [anneeTexte]
     );
 
-    const cotisationsParMois = await lireToutes(
+    const cotisationsParMois = await requete.db.lireToutes(
       `SELECT CAST(strftime('%m', date_paiement) AS INTEGER) AS mois,
               COALESCE(SUM(montant), 0) AS somme
          FROM cotisations
@@ -297,7 +296,7 @@ routeur.get('/', async (requete, reponse) => {
       [anneeTexte]
     );
 
-    const penalitesParMois = await lireToutes(
+    const penalitesParMois = await requete.db.lireToutes(
       `SELECT CAST(strftime('%m', date_reglement) AS INTEGER) AS mois,
               COALESCE(SUM(montant), 0) AS somme
          FROM sanctions
@@ -343,7 +342,7 @@ routeur.get('/', async (requete, reponse) => {
     // chronologique, pas deux colonnes à recouper lui-même.
     // Les décaissements y figurent en négatif : un relevé de caisse mêle les
     // entrées et les sorties, c'est son intérêt.
-    const mouvements = await lireToutes(
+    const mouvements = await requete.db.lireToutes(
       `SELECT 'cotisation' AS nature, c.id, m.name AS membre, c.montant, c.moyen,
               c.date_paiement AS date, NULL AS motif
          FROM cotisations c JOIN members m ON m.id = c.member_id

@@ -18,7 +18,6 @@
 'use strict';
 
 const express = require('express');
-const { executer, lireUne } = require('../db');
 const { exigerRole } = require('../middleware/auth');
 const {
   recevoirDocument,
@@ -45,22 +44,22 @@ function maintenant() {
  * Marque les versions précédentes comme archivées, puis enregistre la nouvelle.
  * Les anciennes lignes — et les objets S3 correspondants — sont conservées.
  */
-async function enregistrerVersion({ type, idMembre, depot }) {
+async function enregistrerVersion(bd, { type, idMembre, depot }) {
   if (type === 'reglement') {
-    await executer("UPDATE documents SET courant = 0 WHERE type = 'reglement' AND courant = 1");
+    await bd.executer("UPDATE documents SET courant = 0 WHERE type = 'reglement' AND courant = 1");
   } else {
-    await executer(
+    await bd.executer(
       "UPDATE documents SET courant = 0 WHERE type = 'fiche_sante' AND member_id = ? AND courant = 1",
       [idMembre]
     );
   }
 
-  const resultat = await executer(
+  const resultat = await bd.executer(
     'INSERT INTO documents (type, member_id, cle_s3, nom_fichier, taille) VALUES (?, ?, ?, ?, ?)',
     [type, idMembre, depot.cle, depot.nom, depot.taille]
   );
 
-  return lireUne(
+  return bd.lireUne(
     'SELECT id, type, member_id, nom_fichier, taille, date_depot FROM documents WHERE id = ?',
     [resultat.id]
   );
@@ -82,7 +81,7 @@ routeur.post(
 
     try {
       const depot = await televerserDocument(requete.file, 'reglement', null);
-      const document = await enregistrerVersion({ type: 'reglement', idMembre: null, depot });
+      const document = await enregistrerVersion(requete.db, { type: 'reglement', idMembre: null, depot });
 
       console.log(
         `[documents] règlement intérieur publié : « ${document.nom_fichier} » ` +
@@ -104,7 +103,7 @@ routeur.post(
 /** GET /api/documents/reglement — version courante (public). */
 routeur.get('/reglement', async (requete, reponse) => {
   try {
-    const document = await lireUne(
+    const document = await requete.db.lireUne(
       "SELECT * FROM documents WHERE type = 'reglement' AND courant = 1 ORDER BY id DESC LIMIT 1"
     );
 
@@ -154,13 +153,13 @@ routeur.post(
     }
 
     try {
-      const membre = await lireUne('SELECT id, name FROM members WHERE id = ?', [idMembre]);
+      const membre = await requete.db.lireUne('SELECT id, name FROM members WHERE id = ?', [idMembre]);
       if (!membre) {
         return reponse.status(404).json({ error: 'Membre introuvable' });
       }
 
       const depot = await televerserDocument(requete.file, 'fiche_sante', idMembre);
-      const document = await enregistrerVersion({ type: 'fiche_sante', idMembre, depot });
+      const document = await enregistrerVersion(requete.db, { type: 'fiche_sante', idMembre, depot });
 
       console.log(
         `[documents] fiche santé déposée — membre #${idMembre} — rôles ${(requete.roles || []).join(',')} — ${maintenant()}`
@@ -187,7 +186,7 @@ routeur.get('/fiche-sante/:member_id', exigerRole('secretaire'), async (requete,
   }
 
   try {
-    const document = await lireUne(
+    const document = await requete.db.lireUne(
       "SELECT * FROM documents WHERE type = 'fiche_sante' AND member_id = ? AND courant = 1 ORDER BY id DESC LIMIT 1",
       [idMembre]
     );
@@ -235,7 +234,7 @@ routeur.delete('/fiche-sante/:member_id', exigerRole('secretaire'), async (reque
   }
 
   try {
-    const document = await lireUne(
+    const document = await requete.db.lireUne(
       "SELECT * FROM documents WHERE type = 'fiche_sante' AND member_id = ? AND courant = 1 ORDER BY id DESC LIMIT 1",
       [idMembre]
     );
@@ -244,7 +243,7 @@ routeur.delete('/fiche-sante/:member_id', exigerRole('secretaire'), async (reque
       return reponse.status(404).json({ error: 'Aucune fiche santé pour ce membre' });
     }
 
-    await executer("DELETE FROM documents WHERE type = 'fiche_sante' AND member_id = ?", [idMembre]);
+    await requete.db.executer("DELETE FROM documents WHERE type = 'fiche_sante' AND member_id = ?", [idMembre]);
 
     // Import tardif : la suppression S3 est facultative, une erreur ici ne doit
     // pas empêcher le retrait de la fiche côté base.

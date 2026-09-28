@@ -28,7 +28,7 @@
  */
 'use strict';
 
-const { lireToutes } = require('../db');
+const parametres = require('./parametres');
 
 /**
  * Contribution mensuelle PAR DÉFAUT, en francs CFA.
@@ -50,27 +50,78 @@ const COTISATION_MENSUELLE =
 const CONTRIBUTION_MAX = 1000000;
 
 /**
+ * Réglages métier d'une association — LOT 7.
+ *
+ * Tout ce qui suit était écrit en dur : le barème des pénalités, le seuil de
+ * mise à l'écart, les bornes de la fenêtre de versement, le jour de séance. Ces
+ * valeurs sont celles de « Santé des extrêmes » ; une association qui joue le
+ * dimanche et pénalise à 500 aurait eu besoin d'un fork du produit.
+ *
+ * Les fonctions de ce module prennent donc un objet de réglages en dernier
+ * argument, et retombent sur les VALEURS HISTORIQUES quand il n'est pas fourni.
+ * Ce repli n'est pas de la complaisance : il garantit que les tests des lots
+ * précédents, et tout appel oublié, produisent exactement les mêmes nombres
+ * qu'avant le LOT 7.
+ */
+const REGLAGES_HISTORIQUES = Object.freeze({
+  contributionDefaut: COTISATION_MENSUELLE,
+  penalites: Object.freeze({ 1: 1000, 2: 2000 }),
+  seuilEcart: 3,
+  jourOuverture: 25,
+  jourEcheance: 5,
+  jourSeance: 6, // samedi, au sens de Date.getUTCDay
+});
+
+/**
+ * Réglages en vigueur pour une base d'association.
+ *
+ * Les paramètres sont lus du cache chargé par le middleware d'association : la
+ * lecture est synchrone, ce qui permet d'appeler ces fonctions des centaines de
+ * fois par requête — une fois par membre et par mois — sans multiplier les
+ * allers-retours vers SQLite.
+ *
+ * @param {object} bd connexion de l'association
+ */
+function reglagesDe(bd) {
+  if (!bd) return REGLAGES_HISTORIQUES;
+  return {
+    contributionDefaut: parametres.entier(bd, 'contribution_defaut', COTISATION_MENSUELLE),
+    penalites: {
+      1: parametres.entier(bd, 'penalite_un_mois', 1000),
+      2: parametres.entier(bd, 'penalite_deux_mois', 2000),
+    },
+    seuilEcart: parametres.entier(bd, 'seuil_exclusion_mois', 3),
+    jourOuverture: parametres.entier(bd, 'fenetre_cotisation_debut', 25),
+    jourEcheance: parametres.entier(bd, 'fenetre_cotisation_fin', 5),
+    jourSeance: parametres.jourSeance(bd),
+  };
+}
+
+/**
  * Contribution mensuelle attendue d'un membre.
  *
  * Repli sur la valeur par défaut si la colonne est absente, nulle ou aberrante :
  * une fiche mal renseignée ne doit pas faire disparaître ses arriérés.
  */
-function contributionDe(membre) {
+function contributionDe(membre, reglages = REGLAGES_HISTORIQUES) {
   const montant = Number(membre && membre.contribution);
-  return Number.isFinite(montant) && montant > 0 ? montant : COTISATION_MENSUELLE;
+  if (Number.isFinite(montant) && montant > 0) return montant;
+  const defaut = Number(reglages && reglages.contributionDefaut);
+  return Number.isFinite(defaut) && defaut > 0 ? defaut : COTISATION_MENSUELLE;
 }
 
-/** Barème des pénalités de retard, par nombre de mois dus. */
-const PENALITES = Object.freeze({ 1: 1000, 2: 2000 });
-
-/** À partir de ce nombre de mois dus, la mise à l'écart remplace la pénalité. */
-const SEUIL_ECART = 3;
-
-/** Jour d'ouverture de la fenêtre de versement, dans le mois précédent. */
-const JOUR_OUVERTURE = 25;
-
-/** Jour d'échéance, dans le mois concerné. */
-const JOUR_ECHEANCE = 5;
+/**
+ * Valeurs historiques, conservées pour la compatibilité des appels sans réglages.
+ *
+ * Elles ne pilotent plus rien : le barème, le seuil et la fenêtre viennent des
+ * paramètres de l'association (cf. reglagesDe). Elles restent exportées parce
+ * que les tests des lots 4 à 6 s'y réfèrent, et parce qu'elles documentent d'où
+ * partent les valeurs par défaut posées à la création d'une base.
+ */
+const PENALITES = REGLAGES_HISTORIQUES.penalites;
+const SEUIL_ECART = REGLAGES_HISTORIQUES.seuilEcart;
+const JOUR_OUVERTURE = REGLAGES_HISTORIQUES.jourOuverture;
+const JOUR_ECHEANCE = REGLAGES_HISTORIQUES.jourEcheance;
 
 /**
  * Date à partir de laquelle les mesures peuvent être appliquées.
@@ -188,14 +239,22 @@ function jourCourt(valeur) {
  * @returns {{jour: string, ouverte: boolean, depassee: boolean,
  *            mois_concerne: string, echeance: string, mois_libelle: string}}
  */
-function fenetreVersement(jour = aujourdhui()) {
+function fenetreVersement(jour = aujourdhui(), reglages = REGLAGES_HISTORIQUES) {
   const numeroJour = Number(String(jour).slice(8, 10));
   const mois = String(jour).slice(0, 7);
+  const ouverture = reglages.jourOuverture;
+  const cloture = reglages.jourEcheance;
 
-  // À partir du 25, c'est déjà la cotisation du mois SUIVANT qui se verse.
-  const moisConcerne = numeroJour >= JOUR_OUVERTURE ? moisDecale(mois, 1) : mois;
-  const echeance = `${moisConcerne}-${String(JOUR_ECHEANCE).padStart(2, '0')}`;
-  const ouverte = numeroJour >= JOUR_OUVERTURE || numeroJour <= JOUR_ECHEANCE;
+  // À partir du jour d'ouverture, c'est déjà la cotisation du mois SUIVANT qui
+  // se verse — sauf si la fenêtre tient dans un seul mois (ouverture <= clôture),
+  // cas d'une association qui n'accepte les versements que du 1er au 5.
+  const anticipee = ouverture > cloture && numeroJour >= ouverture;
+  const moisConcerne = anticipee ? moisDecale(mois, 1) : mois;
+  const echeance = `${moisConcerne}-${String(cloture).padStart(2, '0')}`;
+  const ouverte =
+    ouverture > cloture
+      ? numeroJour >= ouverture || numeroJour <= cloture
+      : numeroJour >= ouverture && numeroJour <= cloture;
 
   return {
     jour,
@@ -216,12 +275,18 @@ function fenetreVersement(jour = aujourdhui()) {
  * @param {string} moisDu mois couvert, AAAA-MM
  * @param {string} dateVersement jour de la remise, AAAA-MM-JJ (ou ISO complet)
  */
-function dansLesDelais(moisDu, dateVersement) {
+function dansLesDelais(moisDu, dateVersement, reglages = REGLAGES_HISTORIQUES) {
   const jour = String(dateVersement || '').slice(0, 10);
   if (!moisValide(moisDu) || jour.length !== 10) return false;
 
-  const ouverture = `${moisDecale(moisDu, -1)}-${String(JOUR_OUVERTURE).padStart(2, '0')}`;
-  const echeance = `${moisDu}-${String(JOUR_ECHEANCE).padStart(2, '0')}`;
+  const jourOuverture = String(reglages.jourOuverture).padStart(2, '0');
+  const jourEcheance = String(reglages.jourEcheance).padStart(2, '0');
+  // Fenêtre à cheval sur deux mois (du 25 au 5) ou tenant dans le mois dû (du
+  // 1er au 5) : c'est le mois de l'ouverture qui change, pas la logique.
+  const moisOuverture =
+    reglages.jourOuverture > reglages.jourEcheance ? moisDecale(moisDu, -1) : moisDu;
+  const ouverture = `${moisOuverture}-${jourOuverture}`;
+  const echeance = `${moisDu}-${jourEcheance}`;
   // Comparaison lexicographique : le format AAAA-MM-JJ la rend chronologique.
   return jour >= ouverture && jour <= echeance;
 }
@@ -239,22 +304,39 @@ function dansLesDelais(moisDu, dateVersement) {
  *
  * @param {string} [jour] date de référence, AAAA-MM-JJ ; aujourd'hui par défaut
  */
-function samediDeLaSemaine(jour = aujourdhui()) {
+function prochaineSeance(jour = aujourdhui(), reglages = REGLAGES_HISTORIQUES) {
   const date = new Date(`${String(jour).slice(0, 10)}T12:00:00Z`);
   if (Number.isNaN(date.getTime())) return jour;
 
+  const cible = Number.isInteger(reglages.jourSeance) ? reglages.jourSeance : 6;
   const jourSemaine = date.getUTCDay(); // 0 = dimanche, 6 = samedi
-  // Dimanche : le samedi est passé, la prochaine séance est dans six jours.
-  const ecart = jourSemaine === 0 ? 6 : 6 - jourSemaine;
+  // Le jour de séance déjà passé cette semaine : la prochaine est la semaine
+  // suivante. Le modulo ramène l'écart dans l'intervalle [0, 6], et rend zéro
+  // le jour même — la séance du jour est bien la prochaine.
+  const ecart = (cible - jourSemaine + 7) % 7;
 
   date.setUTCDate(date.getUTCDate() + ecart);
   return date.toISOString().slice(0, 10);
 }
 
+/**
+ * Alias historique de prochaineSeance.
+ *
+ * Le jour de séance est devenu un paramètre d'association au LOT 7 : le mot
+ * « samedi » ne dit plus la vérité pour une association qui joue le dimanche.
+ * L'alias reste parce que les tests des lots 4 à 6 s'y réfèrent, et parce qu'un
+ * appel sans réglages donne bien le samedi.
+ *
+ * @deprecated utiliser prochaineSeance
+ */
+function samediDeLaSemaine(jour = aujourdhui(), reglages = REGLAGES_HISTORIQUES) {
+  return prochaineSeance(jour, reglages);
+}
+
 /** Pénalité proposée pour un nombre de mois dus ; 0 au-delà du seuil d'écart. */
-function penaliteProposee(nbMois) {
-  if (nbMois >= SEUIL_ECART) return 0; // mise à l'écart, et pas de pénalité en plus
-  return PENALITES[nbMois] || 0;
+function penaliteProposee(nbMois, reglages = REGLAGES_HISTORIQUES) {
+  if (nbMois >= reglages.seuilEcart) return 0; // mise à l'écart, pas de pénalité en plus
+  return reglages.penalites[nbMois] || 0;
 }
 
 /** Les mesures sont-elles applicables à cette date ? */
@@ -292,12 +374,15 @@ function statutMembre(membre) {
  * membre — l'écran Séance se recharge à chaque tirer-pour-rafraîchir, à
  * l'entrée du terrain, sur une connexion mobile.
  *
+ * @param {object} bd connexion de l'association (requete.db)
  * @param {string} mois mois de référence, AAAA-MM
  * @param {string} [jour] jour de référence pour les suspensions, AAAA-MM-JJ
  * @returns {Promise<Array<object>>} un état par membre, trié par nom
  */
-async function construireSituation(mois, jour = aujourdhui()) {
-  const membres = await lireToutes(
+async function construireSituation(bd, mois, jour = aujourdhui()) {
+  const reglages = reglagesDe(bd);
+
+  const membres = await bd.lireToutes(
     `SELECT id, name, date_adhesion, contribution, statut, created_at
        FROM members
       ORDER BY name COLLATE NOCASE ASC`
@@ -305,7 +390,7 @@ async function construireSituation(mois, jour = aujourdhui()) {
 
   // Cotisations validées : un mois réglé est un mois qui ne compte plus comme
   // dû. Le mois retenu est le MOIS DÛ (date_paiement), pas celui du versement.
-  const reglees = await lireToutes(
+  const reglees = await bd.lireToutes(
     `SELECT member_id,
             substr(date_paiement, 1, 7) AS mois,
             SUM(montant) AS montant,
@@ -318,14 +403,14 @@ async function construireSituation(mois, jour = aujourdhui()) {
   // Déclarations encore en attente du trésorier : elles ne mettent personne à
   // jour, mais elles expliquent pourquoi un membre ne peut pas fouler le
   // terrain — « déclaration en attente » n'est pas « rien versé ».
-  const enAttente = await lireToutes(
+  const enAttente = await bd.lireToutes(
     `SELECT member_id, substr(date_paiement, 1, 7) AS mois
        FROM cotisations
       WHERE statut = 'en_attente'
       GROUP BY member_id, mois`
   );
 
-  const sanctions = await lireToutes(
+  const sanctions = await bd.lireToutes(
     `SELECT member_id, type, statut, montant, date_fin
        FROM sanctions
       WHERE statut = 'due'`
@@ -333,7 +418,7 @@ async function construireSituation(mois, jour = aujourdhui()) {
 
   // Pénalités de retard déjà prononcées, par mois de cotisation : c'est elles
   // qui portent l'idempotence des mesures.
-  const penalitesParMois = await lireToutes(
+  const penalitesParMois = await bd.lireToutes(
     `SELECT member_id, mois_concerne
        FROM sanctions
       WHERE type = 'penalite'
@@ -412,7 +497,7 @@ async function construireSituation(mois, jour = aujourdhui()) {
     const cotisationDuMois = payes.get(mois) || null;
     const penalitesDues = Math.round(sanction.penalite_due);
     // Le montant attendu est celui de CE membre, pas un barème uniforme.
-    const contribution = contributionDe(membre);
+    const contribution = contributionDe(membre, reglages);
     const montantDu = moisDus.length * contribution;
 
     return {
@@ -496,20 +581,21 @@ function motifInegibilite(membre, mois) {
  *
  * @param {Array<object>} situation issue de construireSituation
  */
-function classerMesures(situation) {
+function classerMesures(situation, reglages = REGLAGES_HISTORIQUES) {
+  const seuil = reglages.seuilEcart;
   const actifs = situation.filter((membre) => membre.statut === 'actif');
 
   return {
     a_penaliser: actifs.filter(
-      (membre) => membre.nb_mois > 0 && membre.nb_mois < SEUIL_ECART && !membre.deja_penalise
+      (membre) => membre.nb_mois > 0 && membre.nb_mois < seuil && !membre.deja_penalise
     ),
-    a_ecarter: actifs.filter((membre) => membre.nb_mois >= SEUIL_ECART),
+    a_ecarter: actifs.filter((membre) => membre.nb_mois >= seuil),
     peuvent_jouer: actifs.filter((membre) => membre.nb_mois === 0),
     ecartes_deja: situation.filter((membre) => membre.statut === 'ecarte').length,
     // Déjà pénalisés pour CE mois : hors des propositions, mais le bureau doit
     // savoir qu'ils ont été traités, sans quoi la liste paraît trop courte.
     penalises_deja: actifs.filter(
-      (membre) => membre.deja_penalise && membre.nb_mois > 0 && membre.nb_mois < SEUIL_ECART
+      (membre) => membre.deja_penalise && membre.nb_mois > 0 && membre.nb_mois < seuil
     ).length,
   };
 }
@@ -517,6 +603,8 @@ function classerMesures(situation) {
 module.exports = {
   COTISATION_MENSUELLE,
   CONTRIBUTION_MAX,
+  REGLAGES_HISTORIQUES,
+  reglagesDe,
   contributionDe,
   PENALITES,
   SEUIL_ECART,
@@ -534,6 +622,7 @@ module.exports = {
   moisEnLettres,
   moisAnneeEnLettres,
   jourCourt,
+  prochaineSeance,
   samediDeLaSemaine,
   fenetreVersement,
   dansLesDelais,

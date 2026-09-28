@@ -58,7 +58,7 @@ routeur.get('/', async (requete, reponse) => {
   try {
     // Le jour de la séance sert de référence aux suspensions : une séance
     // consultée pour demain doit tenir compte d'un terme qui tombe ce soir.
-    const situation = await construireSituation(mois, date);
+    const situation = await construireSituation(requete.db, mois, date);
 
     const eligibles = [];
     const nonEligibles = [];

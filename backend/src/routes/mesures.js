@@ -30,10 +30,9 @@
 'use strict';
 
 const express = require('express');
-const { executer } = require('../db');
 const { exigerRole, estMembreProtege } = require('../middleware/auth');
 const {
-  SEUIL_ECART,
+  reglagesDe,
   dateEffetMesures,
   aujourdhui,
   moisCourant,
@@ -101,13 +100,14 @@ function lireIdentifiants(valeur) {
  * @param {string} mois mois de référence, AAAA-MM
  * @param {string} [jour] jour de référence ; aujourd'hui par défaut
  */
-async function construireMesures(mois, jour = aujourdhui()) {
-  const situation = await construireSituation(mois, jour);
+async function construireMesures(bd, mois, jour = aujourdhui()) {
+  const reglages = reglagesDe(bd);
+  const situation = await construireSituation(bd, mois, jour);
 
   // Le classement vit dans le service : /api/stats en compte les longueurs pour
   // le raccourci de l'écran d'accueil, et deux copies de ces filtres auraient
   // fini par ne plus dire la même chose.
-  const classement = classerMesures(situation);
+  const classement = classerMesures(situation, reglages);
 
   const aPenaliser = classement.a_penaliser
     .map((membre) => ({
@@ -115,7 +115,7 @@ async function construireMesures(mois, jour = aujourdhui()) {
       name: membre.name,
       mois_de_retard: membre.nb_mois,
       mois_dus: membre.mois_dus,
-      penalite_proposee: penaliteProposee(membre.nb_mois),
+      penalite_proposee: penaliteProposee(membre.nb_mois, reglages),
       montant_du: membre.montant_du,
       deja_penalise: false,
     }))
@@ -166,7 +166,7 @@ routeur.get('/', async (requete, reponse) => {
   }
 
   try {
-    const charge = await construireMesures(lecture.mois);
+    const charge = await construireMesures(requete.db, lecture.mois);
 
     console.log(
       `[mesures] ${lecture.mois} servi : ${charge.resume.a_penaliser} à pénaliser, ` +
@@ -210,7 +210,8 @@ routeur.post('/penalites', exigerRole('censeur'), async (requete, reponse) => {
   if (liste.erreur) return reponse.status(400).json({ error: liste.erreur });
 
   try {
-    const situation = await construireSituation(lecture.mois);
+    const reglages = reglagesDe(requete.db);
+    const situation = await construireSituation(requete.db, lecture.mois);
     const parIdentifiant = new Map(situation.map((membre) => [membre.id, membre]));
     const estAdmin = (requete.roles || []).includes('admin');
 
@@ -241,7 +242,7 @@ routeur.post('/penalites', exigerRole('censeur'), async (requete, reponse) => {
         ignores.push({
           id: identifiant,
           name: membre.name,
-          motif: membre.nb_mois >= SEUIL_ECART
+          motif: membre.nb_mois >= reglages.seuilEcart
             ? 'mise à l’écart proposée, pas de pénalité'
             : 'aucun retard à sanctionner',
         });
@@ -262,7 +263,7 @@ routeur.post('/penalites', exigerRole('censeur'), async (requete, reponse) => {
       const motif = `Retard de cotisation — ${moisAnneeEnLettres(lecture.mois)} ` +
         `(${membre.nb_mois} mois)`;
 
-      await executer(
+      await requete.db.executer(
         `INSERT INTO sanctions (member_id, type, motif, montant, mois_concerne, inflige_par)
          VALUES (?, 'penalite', ?, ?, ?, ?)`,
         [membre.id, motif.slice(0, MOTIF_MAX), montant, lecture.mois, requete.agent]
@@ -316,7 +317,8 @@ routeur.post('/ecarts', exigerRole('secretaire'), async (requete, reponse) => {
   const motifSaisi = typeof requete.body?.motif === 'string' ? requete.body.motif.trim() : '';
 
   try {
-    const situation = await construireSituation(lecture.mois);
+    const reglages = reglagesDe(requete.db);
+    const situation = await construireSituation(requete.db, lecture.mois);
     const parIdentifiant = new Map(situation.map((membre) => [membre.id, membre]));
 
     const appliques = [];
@@ -337,11 +339,11 @@ routeur.post('/ecarts', exigerRole('secretaire'), async (requete, reponse) => {
 
       // Le seuil est recalculé côté serveur : on n'écarte pas quelqu'un qui
       // doit un mois parce que l'application l'aurait mal classé.
-      if (membre.nb_mois < SEUIL_ECART) {
+      if (membre.nb_mois < reglages.seuilEcart) {
         ignores.push({
           id: identifiant,
           name: membre.name,
-          motif: `${membre.nb_mois} mois de retard, seuil de ${SEUIL_ECART} non atteint`,
+          motif: `${membre.nb_mois} mois de retard, seuil de ${reglages.seuilEcart} non atteint`,
         });
         continue;
       }
@@ -350,7 +352,7 @@ routeur.post('/ecarts', exigerRole('secretaire'), async (requete, reponse) => {
         `Retard de cotisation — ${membre.nb_mois} mois dus au ${moisAnneeEnLettres(lecture.mois)}`)
         .slice(0, MOTIF_MAX);
 
-      await executer(
+      await requete.db.executer(
         `UPDATE members
             SET statut = 'ecarte',
                 date_statut = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
@@ -359,7 +361,7 @@ routeur.post('/ecarts', exigerRole('secretaire'), async (requete, reponse) => {
         [motif, membre.id]
       );
 
-      await executer(
+      await requete.db.executer(
         `INSERT INTO evenements_membres (member_id, type, motif, acteur, mois)
          VALUES (?, 'mise_a_l_ecart', ?, ?, ?)`,
         [membre.id, motif, requete.agent, lecture.mois]

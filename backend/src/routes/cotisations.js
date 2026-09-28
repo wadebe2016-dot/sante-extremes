@@ -27,9 +27,8 @@
 'use strict';
 
 const express = require('express');
-const { executer, lireUne, lireToutes } = require('../db');
 const { exigerRole, memeMembre } = require('../middleware/auth');
-const { fenetreVersement } = require('../services/arrieres');
+const { fenetreVersement, reglagesDe } = require('../services/arrieres');
 const {
   recevoirJustificatif,
   recevoirRecu,
@@ -74,10 +73,11 @@ function normaliserMoyen(valeur) {
  * celui fait dans les délais. Hors de cette fenêtre, le refus tient : on
  * n'enregistre pas en mars un paiement pour décembre.
  *
+ * @param {object} bd connexion de l'association (fenêtre de versement réglée)
  * @param {string} valeur mois demandé, au format AAAA-MM
  * @returns {{date: string}|{erreur: string}} date ISO à enregistrer, ou motif de refus
  */
-function convertirMoisEnDate(valeur) {
+function convertirMoisEnDate(bd, valeur) {
   const mois = String(valeur || '').trim();
 
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(mois)) {
@@ -86,7 +86,7 @@ function convertirMoisEnDate(valeur) {
 
   // Comparaison lexicographique : le format AAAA-MM la rend équivalente à une
   // comparaison chronologique.
-  const moisMaximal = fenetreVersement().mois_concerne;
+  const moisMaximal = fenetreVersement(undefined, reglagesDe(bd)).mois_concerne;
   if (mois > moisMaximal) {
     return { erreur: 'Impossible d’enregistrer un paiement pour un mois à venir' };
   }
@@ -220,7 +220,7 @@ routeur.post(
     // Mois facultatif : absent, la cotisation est datée de maintenant (défaut SQL).
     let datePaiement = null;
     if (moisDemande !== undefined && moisDemande !== null && String(moisDemande).trim() !== '') {
-      const conversion = convertirMoisEnDate(moisDemande);
+      const conversion = convertirMoisEnDate(requete.db, moisDemande);
       if (conversion.erreur) {
         console.warn(`[cotisations] refus : mois « ${moisDemande} » — ${conversion.erreur}`);
         return reponse.status(400).json({ error: conversion.erreur });
@@ -236,7 +236,7 @@ routeur.post(
     }
 
     try {
-      const membre = await lireUne('SELECT id, name FROM members WHERE id = ?', [idMembre]);
+      const membre = await requete.db.lireUne('SELECT id, name FROM members WHERE id = ?', [idMembre]);
       if (!membre) {
         console.warn(`[cotisations] refus : membre #${idMembre} introuvable`);
         return reponse.status(404).json({ error: 'Membre introuvable' });
@@ -261,18 +261,18 @@ routeur.post(
 
       // Saisie par le trésorier : la cotisation est validée d'emblée.
       const resultat = datePaiement
-        ? await executer(
+        ? await requete.db.executer(
             `INSERT INTO cotisations (member_id, montant, moyen, fichier_s3_url, date_paiement, date_versement, statut, date_validation, valide_par)
              VALUES (?, ?, ?, ?, ?, ?, 'validee', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?)`,
             [idMembre, montant, moyen, urlJustificatif, datePaiement, versement.date, requete.agent]
           )
-        : await executer(
+        : await requete.db.executer(
             `INSERT INTO cotisations (member_id, montant, moyen, fichier_s3_url, date_versement, statut, date_validation, valide_par)
              VALUES (?, ?, ?, ?, ?, 'validee', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ?)`,
             [idMembre, montant, moyen, urlJustificatif, versement.date, requete.agent]
           );
 
-      const cotisation = await lireUne(
+      const cotisation = await requete.db.lireUne(
         `SELECT id, member_id, montant, moyen, fichier_s3_url, date_paiement, date_versement, valide_par
            FROM cotisations WHERE id = ?`,
         [resultat.id]
@@ -362,7 +362,7 @@ routeur.post(
         .json({ error: `Moyen de paiement invalide (attendu : ${MOYENS_AUTORISES.join(' ou ')})` });
     }
 
-    const conversion = convertirMoisEnDate(moisDemande);
+    const conversion = convertirMoisEnDate(requete.db, moisDemande);
     if (conversion.erreur) {
       return reponse.status(400).json({ error: conversion.erreur });
     }
@@ -392,13 +392,13 @@ routeur.post(
     }
 
     try {
-      const membre = await lireUne('SELECT id, name FROM members WHERE id = ?', [idMembre]);
+      const membre = await requete.db.lireUne('SELECT id, name FROM members WHERE id = ?', [idMembre]);
       if (!membre) {
         return reponse.status(404).json({ error: 'Membre introuvable' });
       }
 
       // Un mois déjà réglé — ou déjà déclaré — ne se déclare pas deux fois.
-      const existante = await lireUne(
+      const existante = await requete.db.lireUne(
         `SELECT id, statut FROM cotisations
           WHERE member_id = ?
             AND strftime('%Y-%m', date_paiement) = ?
@@ -421,7 +421,7 @@ routeur.post(
         ? await televerserJustificatifDetaille(requete.file, idMembre)
         : { url: null, cle: null };
 
-      const resultat = await executer(
+      const resultat = await requete.db.executer(
         `INSERT INTO cotisations (member_id, montant, moyen, fichier_s3_url, cle_s3, statut, date_paiement, date_versement)
          VALUES (?, ?, ?, ?, ?, 'en_attente', ?, ?)`,
         [idMembre, montant, moyen, depot.url, depot.cle, conversion.date, versement.date]
@@ -453,7 +453,7 @@ routeur.post(
 /** GET /api/cotisations/en-attente — file de validation du trésorier. */
 routeur.get('/en-attente', exigerRole('tresorier'), async (requete, reponse) => {
   try {
-    const lignes = await lireToutes(
+    const lignes = await requete.db.lireToutes(
       `SELECT c.id, c.member_id, m.name AS member_name, c.montant, c.moyen,
               c.date_paiement, c.date_versement, c.cle_s3, c.fichier_s3_url
          FROM cotisations c
@@ -508,7 +508,7 @@ routeur.get('/:id/justificatif', exigerRole('tresorier'), async (requete, repons
   }
 
   try {
-    const cotisation = await lireUne('SELECT id, cle_s3 FROM cotisations WHERE id = ?', [identifiant]);
+    const cotisation = await requete.db.lireUne('SELECT id, cle_s3 FROM cotisations WHERE id = ?', [identifiant]);
     if (!cotisation) {
       return reponse.status(404).json({ error: 'Cotisation introuvable' });
     }
@@ -534,7 +534,7 @@ routeur.post('/:id/valider', exigerRole('tresorier'), async (requete, reponse) =
   }
 
   try {
-    const cotisation = await lireUne(
+    const cotisation = await requete.db.lireUne(
       `SELECT c.*, m.name AS member_name
          FROM cotisations c JOIN members m ON m.id = c.member_id
         WHERE c.id = ?`,
@@ -556,7 +556,7 @@ routeur.post('/:id/valider', exigerRole('tresorier'), async (requete, reponse) =
       });
     }
 
-    await executer(
+    await requete.db.executer(
       `UPDATE cotisations
           SET statut = 'validee',
               motif_refus = NULL,
@@ -599,7 +599,7 @@ routeur.post('/:id/refuser', exigerRole('tresorier'), async (requete, reponse) =
   }
 
   try {
-    const cotisation = await lireUne(
+    const cotisation = await requete.db.lireUne(
       `SELECT c.*, m.name AS member_name
          FROM cotisations c JOIN members m ON m.id = c.member_id
         WHERE c.id = ?`,
@@ -621,7 +621,7 @@ routeur.post('/:id/refuser', exigerRole('tresorier'), async (requete, reponse) =
       });
     }
 
-    await executer(
+    await requete.db.executer(
       `UPDATE cotisations
           SET statut = 'refusee', motif_refus = ?, valide_par = ?, date_validation = NULL
         WHERE id = ?`,

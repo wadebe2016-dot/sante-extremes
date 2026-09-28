@@ -30,17 +30,43 @@
 'use strict';
 
 const express = require('express');
-const { executer, lireUne, lireToutes } = require('../db');
 const { exigerRole } = require('../middleware/auth');
 const {
   moisCourant,
   moisValide,
   contributionDe,
+  reglagesDe,
   COTISATION_MENSUELLE,
   CONTRIBUTION_MAX,
 } = require('../services/arrieres');
+const { masquerTelephone, normaliserTelephone } = require('../services/codes');
 
 const routeur = express.Router();
+
+/**
+ * Lit un numéro de téléphone soumis par le secrétariat.
+ *
+ * Le numéro n'est pas décoratif : c'est le seul point d'accroche de la
+ * réinitialisation d'un code par SMS, et un rôle ne peut être attribué qu'à un
+ * membre qui en a un. La saisie est tolérante (espaces, indicatif omis, 00237)
+ * et le stockage normalisé — sans quoi « 699 12 34 56 » et « +237699123456 »
+ * désigneraient deux personnes différentes au moment de la réinitialisation.
+ *
+ * Une chaîne vide EFFACE le numéro : un membre qui quitte le bureau doit pouvoir
+ * retirer son numéro de la base.
+ *
+ * @returns {{valeur: string|null}|{erreur: string}}
+ */
+function lireTelephone(brut) {
+  const saisie = String(brut == null ? '' : brut).trim();
+  if (saisie === '') return { valeur: null };
+
+  const normalise = normaliserTelephone(saisie);
+  if (!normalise) {
+    return { erreur: 'Téléphone invalide (format attendu : +237 puis neuf chiffres)' };
+  }
+  return { valeur: normalise };
+}
 
 /** Statuts reconnus. La liste fermée est tenue ici, pas par un CHECK SQLite. */
 const STATUTS = Object.freeze(['actif', 'ecarte']);
@@ -100,8 +126,18 @@ function lireContribution(valeur) {
   return { montant };
 }
 
-/** Met en forme une ligne de « members » pour l'API. */
-function formaterMembre(ligne) {
+/**
+ * Met en forme une ligne de « members » pour l'API.
+ *
+ * Le téléphone est renvoyé MASQUÉ (+237******789). Le secrétariat qui le saisit
+ * n'a pas besoin de le relire en clair depuis l'application, et une liste de
+ * membres en clair est exactement ce qu'un export mal protégé laisserait fuir.
+ * Le numéro complet ne sort jamais de la base.
+ *
+ * @param {object} ligne ligne de « members »
+ * @param {object} [reglages] réglages de l'association (contribution par défaut)
+ */
+function formaterMembre(ligne, reglages) {
   return {
     id: ligne.id,
     name: ligne.name,
@@ -110,7 +146,9 @@ function formaterMembre(ligne) {
     date_adhesion: ligne.date_adhesion || `${String(ligne.created_at || '').slice(0, 7)}-01`,
     // Repli sur la valeur par défaut plutôt que null : l'application affiche un
     // montant, elle n'a pas à deviner lequel.
-    contribution: contributionDe(ligne),
+    contribution: contributionDe(ligne, reglages),
+    telephone: ligne.telephone ? masquerTelephone(ligne.telephone) : null,
+    telephone_renseigne: Boolean(ligne.telephone),
     statut: ligne.statut === 'ecarte' ? 'ecarte' : 'actif',
     date_statut: ligne.date_statut || null,
     motif_statut: ligne.motif_statut || null,
@@ -121,13 +159,14 @@ function formaterMembre(ligne) {
 /** GET /api/admin/members — liste des membres, triée par nom */
 routeur.get('/members', async (requete, reponse) => {
   try {
-    const lignes = await lireToutes(
-      `SELECT id, name, date_adhesion, contribution, statut, date_statut, motif_statut, created_at
+    const lignes = await requete.db.lireToutes(
+      `SELECT id, name, telephone, date_adhesion, contribution, statut, date_statut, motif_statut, created_at
          FROM members
         ORDER BY name COLLATE NOCASE ASC`
     );
 
-    const membres = lignes.map(formaterMembre);
+    const reglages = reglagesDe(requete.db);
+    const membres = lignes.map((ligne) => formaterMembre(ligne, reglages));
     const ecartes = membres.filter((membre) => membre.statut === 'ecarte').length;
 
     console.log(
@@ -173,7 +212,7 @@ routeur.post('/members', async (requete, reponse) => {
 
   // Sans montant explicite, le barème de base s'applique. C'est le cas le plus
   // fréquent, et le secrétariat corrige d'un geste les membres à 5 000.
-  let contribution = COTISATION_MENSUELLE;
+  let contribution = reglagesDe(requete.db).contributionDefaut;
   const montantDemande = requete.body?.contribution;
   if (montantDemande !== undefined && montantDemande !== null && String(montantDemande).trim() !== '') {
     const lecture = lireContribution(montantDemande);
@@ -184,13 +223,25 @@ routeur.post('/members', async (requete, reponse) => {
     contribution = lecture.montant;
   }
 
+  let telephone = null;
+  const telephoneDemande = requete.body?.telephone;
+  if (telephoneDemande !== undefined && telephoneDemande !== null) {
+    const lecture = lireTelephone(telephoneDemande);
+    if (lecture.erreur) {
+      console.warn(`[admin] création refusée : ${lecture.erreur}`);
+      return reponse.status(400).json({ error: lecture.erreur });
+    }
+    telephone = lecture.valeur;
+  }
+
   try {
-    const resultat = await executer(
-      "INSERT INTO members (name, date_adhesion, contribution, statut) VALUES (?, ?, ?, 'actif')",
-      [nom, adhesion, contribution]
+    const resultat = await requete.db.executer(
+      "INSERT INTO members (name, telephone, date_adhesion, contribution, statut)" +
+        " VALUES (?, ?, ?, ?, 'actif')",
+      [nom, telephone, adhesion, contribution]
     );
-    const ligne = await lireUne(
-      `SELECT id, name, date_adhesion, contribution, statut, date_statut, motif_statut, created_at
+    const ligne = await requete.db.lireUne(
+      `SELECT id, name, telephone, date_adhesion, contribution, statut, date_statut, motif_statut, created_at
          FROM members WHERE id = ?`,
       [resultat.id]
     );
@@ -199,7 +250,7 @@ routeur.post('/members', async (requete, reponse) => {
       `[admin] membre créé : #${ligne.id} ${ligne.name} — adhésion ${adhesion.slice(0, 7)}, ` +
         `contribution ${contribution}`
     );
-    return reponse.status(201).json(formaterMembre(ligne));
+    return reponse.status(201).json(formaterMembre(ligne, reglagesDe(requete.db)));
   } catch (erreur) {
     if (String(erreur.message).includes('UNIQUE')) {
       console.warn(`[admin] membre déjà existant : ${nom}`);
@@ -231,6 +282,7 @@ routeur.patch('/members/:id', async (requete, reponse) => {
 
   const adhesionDemandee = requete.body?.date_adhesion;
   const contributionDemandee = requete.body?.contribution;
+  const telephoneDemande = requete.body?.telephone;
 
   const veutAdhesion =
     adhesionDemandee !== undefined && adhesionDemandee !== null &&
@@ -239,10 +291,14 @@ routeur.patch('/members/:id', async (requete, reponse) => {
     contributionDemandee !== undefined && contributionDemandee !== null &&
     String(contributionDemandee).trim() !== '';
 
-  if (!veutAdhesion && !veutContribution) {
+  // Le téléphone accepte la chaîne vide, qui l'efface : « veut » ne peut donc
+  // pas se déduire d'une valeur non vide comme pour les deux autres champs.
+  const veutTelephone = telephoneDemande !== undefined && telephoneDemande !== null;
+
+  if (!veutAdhesion && !veutContribution && !veutTelephone) {
     return reponse
       .status(400)
-      .json({ error: 'Indiquez la date d’adhésion ou la contribution mensuelle' });
+      .json({ error: 'Indiquez la date d’adhésion, la contribution mensuelle ou le téléphone' });
   }
 
   // Les deux champs sont validés AVANT la moindre écriture : une requête qui
@@ -271,8 +327,18 @@ routeur.patch('/members/:id', async (requete, reponse) => {
     valeurs.push(lecture.montant);
   }
 
+  if (veutTelephone) {
+    const lecture = lireTelephone(telephoneDemande);
+    if (lecture.erreur) {
+      console.warn(`[admin] correction refusée : ${lecture.erreur}`);
+      return reponse.status(400).json({ error: lecture.erreur });
+    }
+    colonnes.push('telephone = ?');
+    valeurs.push(lecture.valeur);
+  }
+
   try {
-    const resultat = await executer(
+    const resultat = await requete.db.executer(
       `UPDATE members SET ${colonnes.join(', ')} WHERE id = ?`,
       [...valeurs, identifiant]
     );
@@ -281,8 +347,8 @@ routeur.patch('/members/:id', async (requete, reponse) => {
       return reponse.status(404).json({ error: 'Membre introuvable' });
     }
 
-    const ligne = await lireUne(
-      `SELECT id, name, date_adhesion, contribution, statut, date_statut, motif_statut, created_at
+    const ligne = await requete.db.lireUne(
+      `SELECT id, name, telephone, date_adhesion, contribution, statut, date_statut, motif_statut, created_at
          FROM members WHERE id = ?`,
       [identifiant]
     );
@@ -290,9 +356,9 @@ routeur.patch('/members/:id', async (requete, reponse) => {
     console.log(
       `[admin] fiche corrigée : #${identifiant} ${ligne.name} — ` +
         `adhésion ${String(ligne.date_adhesion || '').slice(0, 7)}, ` +
-        `contribution ${contributionDe(ligne)}`
+        `contribution ${contributionDe(ligne, reglagesDe(requete.db))}`
     );
-    return reponse.status(200).json(formaterMembre(ligne));
+    return reponse.status(200).json(formaterMembre(ligne, reglagesDe(requete.db)));
   } catch (erreur) {
     console.error(`[admin] erreur à la correction de la fiche #${identifiant} : ${erreur.message}`);
     return reponse.status(500).json({ error: 'Impossible de corriger la fiche du membre' });
@@ -327,7 +393,7 @@ routeur.post('/members/:id/statut', async (requete, reponse) => {
   }
 
   try {
-    const membre = await lireUne('SELECT id, name, statut FROM members WHERE id = ?', [identifiant]);
+    const membre = await requete.db.lireUne('SELECT id, name, statut FROM members WHERE id = ?', [identifiant]);
     if (!membre) {
       return reponse.status(404).json({ error: 'Membre introuvable' });
     }
@@ -341,7 +407,7 @@ routeur.post('/members/:id/statut', async (requete, reponse) => {
 
     const motif = motifSaisi.slice(0, MOTIF_MAX) || null;
 
-    await executer(
+    await requete.db.executer(
       `UPDATE members
           SET statut = ?,
               date_statut = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
@@ -350,7 +416,7 @@ routeur.post('/members/:id/statut', async (requete, reponse) => {
       [statut, motif, identifiant]
     );
 
-    await executer(
+    await requete.db.executer(
       `INSERT INTO evenements_membres (member_id, type, motif, acteur)
        VALUES (?, ?, ?, ?)`,
       [
@@ -361,8 +427,8 @@ routeur.post('/members/:id/statut', async (requete, reponse) => {
       ]
     );
 
-    const ligne = await lireUne(
-      `SELECT id, name, date_adhesion, contribution, statut, date_statut, motif_statut, created_at
+    const ligne = await requete.db.lireUne(
+      `SELECT id, name, telephone, date_adhesion, contribution, statut, date_statut, motif_statut, created_at
          FROM members WHERE id = ?`,
       [identifiant]
     );
@@ -371,7 +437,7 @@ routeur.post('/members/:id/statut', async (requete, reponse) => {
       `[admin] ${statut === 'ecarte' ? 'mis à l’écart' : 'réintégré'} : ` +
         `#${identifiant} ${membre.name} par ${requete.agent}${motif ? ` — ${motif}` : ''}`
     );
-    return reponse.status(200).json(formaterMembre(ligne));
+    return reponse.status(200).json(formaterMembre(ligne, reglagesDe(requete.db)));
   } catch (erreur) {
     console.error(`[admin] erreur au changement de statut #${identifiant} : ${erreur.message}`);
     return reponse.status(500).json({ error: 'Impossible de changer le statut du membre' });
@@ -394,7 +460,7 @@ routeur.delete('/members/:id', async (requete, reponse) => {
   }
 
   try {
-    const resultat = await executer('DELETE FROM members WHERE id = ?', [identifiant]);
+    const resultat = await requete.db.executer('DELETE FROM members WHERE id = ?', [identifiant]);
 
     if (resultat.changements === 0) {
       console.warn(`[admin] suppression sans effet : membre #${identifiant} introuvable`);

@@ -14,7 +14,6 @@
 'use strict';
 
 const express = require('express');
-const { executer, lireUne, lireToutes } = require('../db');
 const { exigerRole, estMembreProtege } = require('../middleware/auth');
 
 const routeur = express.Router();
@@ -124,7 +123,7 @@ routeur.get('/', async (requete, reponse) => {
       parametres.push(String(annee));
     }
 
-    const lignes = await lireToutes(
+    const lignes = await requete.db.lireToutes(
       `SELECT s.*, m.name AS member_name
          FROM sanctions s
          JOIN members m ON m.id = s.member_id
@@ -239,7 +238,7 @@ routeur.post('/', exigerRole('censeur'), async (requete, reponse) => {
   }
 
   try {
-    const membre = await lireUne('SELECT id, name FROM members WHERE id = ?', [idMembre]);
+    const membre = await requete.db.lireUne('SELECT id, name FROM members WHERE id = ?', [idMembre]);
     if (!membre) {
       return reponse.status(404).json({ error: 'Membre introuvable' });
     }
@@ -253,12 +252,12 @@ routeur.post('/', exigerRole('censeur'), async (requete, reponse) => {
       });
     }
 
-    const resultat = await executer(
+    const resultat = await requete.db.executer(
       'INSERT INTO sanctions (member_id, type, motif, montant, date_fin) VALUES (?, ?, ?, ?, ?)',
       [idMembre, type, motif, montant, dateFin]
     );
 
-    const ligne = await lireUne(
+    const ligne = await requete.db.lireUne(
       `SELECT s.*, m.name AS member_name
          FROM sanctions s JOIN members m ON m.id = s.member_id
         WHERE s.id = ?`,
@@ -283,7 +282,7 @@ routeur.post('/:id/lever', exigerRole('censeur'), async (requete, reponse) => {
   }
 
   try {
-    const sanction = await lireUne('SELECT * FROM sanctions WHERE id = ?', [identifiant]);
+    const sanction = await requete.db.lireUne('SELECT * FROM sanctions WHERE id = ?', [identifiant]);
     if (!sanction) {
       return reponse.status(404).json({ error: 'Sanction introuvable' });
     }
@@ -292,7 +291,7 @@ routeur.post('/:id/lever', exigerRole('censeur'), async (requete, reponse) => {
       return reponse.status(400).json({ error: 'Seule une suspension peut être levée' });
     }
 
-    const membreLeve = await lireUne('SELECT name FROM members WHERE id = ?', [sanction.member_id]);
+    const membreLeve = await requete.db.lireUne('SELECT name FROM members WHERE id = ?', [sanction.member_id]);
     if (estMembreProtege(membreLeve?.name) && !(requete.roles || []).includes('admin')) {
       return reponse.status(403).json({
         error: 'Ce membre ne peut être sanctionné qu’avec le code administrateur',
@@ -303,9 +302,9 @@ routeur.post('/:id/lever', exigerRole('censeur'), async (requete, reponse) => {
       return reponse.status(409).json({ error: `Cette suspension est déjà « ${sanction.statut} »` });
     }
 
-    await executer("UPDATE sanctions SET statut = 'levee' WHERE id = ?", [identifiant]);
+    await requete.db.executer("UPDATE sanctions SET statut = 'levee' WHERE id = ?", [identifiant]);
 
-    const ligne = await lireUne(
+    const ligne = await requete.db.lireUne(
       `SELECT s.*, m.name AS member_name
          FROM sanctions s JOIN members m ON m.id = s.member_id
         WHERE s.id = ?`,
@@ -335,12 +334,12 @@ routeur.delete('/:id', exigerRole('censeur'), async (requete, reponse) => {
   }
 
   try {
-    const sanction = await lireUne('SELECT * FROM sanctions WHERE id = ?', [identifiant]);
+    const sanction = await requete.db.lireUne('SELECT * FROM sanctions WHERE id = ?', [identifiant]);
     if (!sanction) {
       return reponse.status(404).json({ error: 'Sanction introuvable' });
     }
 
-    const membreAnnule = await lireUne('SELECT name FROM members WHERE id = ?', [sanction.member_id]);
+    const membreAnnule = await requete.db.lireUne('SELECT name FROM members WHERE id = ?', [sanction.member_id]);
     if (estMembreProtege(membreAnnule?.name) && !(requete.roles || []).includes('admin')) {
       return reponse.status(403).json({
         error: 'Ce membre ne peut être sanctionné qu’avec le code administrateur',
@@ -355,7 +354,7 @@ routeur.delete('/:id', exigerRole('censeur'), async (requete, reponse) => {
       return reponse.status(409).json({ error: 'Une pénalité déjà réglée ne peut plus être annulée' });
     }
 
-    await executer("UPDATE sanctions SET statut = 'annulee' WHERE id = ?", [identifiant]);
+    await requete.db.executer("UPDATE sanctions SET statut = 'annulee' WHERE id = ?", [identifiant]);
 
     console.log(`[sanctions] sanction annulée : #${identifiant}`);
     return reponse.status(200).json({ message: 'Sanction annulée' });

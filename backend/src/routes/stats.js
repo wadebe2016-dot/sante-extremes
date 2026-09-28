@@ -37,7 +37,6 @@
 'use strict';
 
 const express = require('express');
-const { lireToutes } = require('../db');
 const { calculerSoldeReel } = require('./tresorerie');
 const { estRegularisation } = require('./cotisations');
 const {
@@ -48,7 +47,8 @@ const {
   mesuresApplicables,
   dateEffetMesures,
   aujourdhui,
-  samediDeLaSemaine,
+  prochaineSeance,
+  reglagesDe,
 } = require('../services/arrieres');
 
 const routeur = express.Router();
@@ -56,9 +56,14 @@ const routeur = express.Router();
 /** GET /api/stats — état des cotisations de tous les membres */
 routeur.get('/', async (requete, reponse) => {
   try {
+    // Réglages de CETTE association : contribution par défaut, barème des
+    // pénalités, seuil d'écart, jour de séance. Lus une fois pour toute la
+    // réponse — ils ne changent pas en cours de requête.
+    const reglages = reglagesDe(requete.db);
+
     // Seules les cotisations VALIDÉES comptent : une déclaration en attente ne
     // met pas un membre à jour et n'entre dans aucun total.
-    const lignes = await lireToutes(`
+    const lignes = await requete.db.lireToutes(`
       SELECT
         m.id,
         m.name,
@@ -84,7 +89,7 @@ routeur.get('/', async (requete, reponse) => {
 
     // Détail du dernier versement de chaque membre, pour la sous-ligne de
     // l'écran État (« 3 sept · 10 000 · Mobile Money »).
-    const derniers = await lireToutes(`
+    const derniers = await requete.db.lireToutes(`
       SELECT c.member_id, c.montant, c.moyen, c.date_paiement, c.date_versement
         FROM cotisations c
         JOIN (
@@ -102,7 +107,7 @@ routeur.get('/', async (requete, reponse) => {
     const detailParMembre = new Map(derniers.map((ligne) => [ligne.member_id, ligne]));
 
     // Déclarations du mois courant encore en attente du trésorier.
-    const enAttente = await lireToutes(`
+    const enAttente = await requete.db.lireToutes(`
       SELECT member_id, COUNT(*) AS nombre
         FROM cotisations
        WHERE statut = 'en_attente'
@@ -114,7 +119,7 @@ routeur.get('/', async (requete, reponse) => {
 
     // Dernier refus du mois : le membre doit savoir pourquoi sa déclaration a
     // été écartée, sans quoi il la renverra à l'identique.
-    const refus = await lireToutes(`
+    const refus = await requete.db.lireToutes(`
       SELECT member_id, motif_refus
         FROM cotisations
        WHERE statut = 'refusee'
@@ -130,7 +135,7 @@ routeur.get('/', async (requete, reponse) => {
     const refusParMembre = new Map(refus.map((ligne) => [ligne.member_id, ligne.motif_refus]));
 
     // Sanctions en cours : pénalités non réglées et suspensions non échues.
-    const sanctions = await lireToutes(`
+    const sanctions = await requete.db.lireToutes(`
       SELECT member_id,
              COALESCE(SUM(CASE WHEN type = 'penalite' AND statut = 'due' THEN montant ELSE 0 END), 0) AS penalite_due,
              MAX(CASE
@@ -162,7 +167,7 @@ routeur.get('/', async (requete, reponse) => {
         name: ligne.name,
         // Montant mensuel attendu de CE membre : la cotisation n'est pas
         // uniforme, et l'écran doit pouvoir dire « 5 000/mois » sous son nom.
-        contribution: contributionDe(ligne),
+        contribution: contributionDe(ligne, reglages),
         paid: paye,
         statut_mois: statutMois,
         motif_refus: statutMois === 'impaye' ? refusParMembre.get(ligne.id) || null : null,
@@ -186,7 +191,7 @@ routeur.get('/', async (requete, reponse) => {
     // Les écartés ne sont pas dans la liste, mais l'application doit pouvoir
     // dire « 38 actifs · 3 mis à l'écart » plutôt que de laisser croire à une
     // disparition.
-    const comptes = await lireToutes(
+    const comptes = await requete.db.lireToutes(
       `SELECT COUNT(*) AS ecartes FROM members WHERE COALESCE(statut, 'actif') = 'ecarte'`
     );
     const nombreEcartes = Number(comptes[0] ? comptes[0].ecartes : 0) || 0;
@@ -196,18 +201,18 @@ routeur.get('/', async (requete, reponse) => {
     // séance se joue aujourd'hui, et les arriérés s'arrêtent au mois courant.
     const jour = aujourdhui();
     const moisRaccourcis = jour.slice(0, 7);
-    const situationMembres = await construireSituation(moisRaccourcis, jour);
-    const classement = classerMesures(situationMembres);
+    const situationMembres = await construireSituation(requete.db, moisRaccourcis, jour);
+    const classement = classerMesures(situationMembres, reglages);
 
     // La séance se joue le samedi : c'est cette date que l'écran d'accueil
     // annonce, et sur elle que la feuille de séance s'ouvre. Un samedi tombant
     // le mois suivant change l'éligibilité de tout le monde — la cotisation due
     // n'est plus la même — d'où une situation construite à sa date, et non
     // celle d'aujourd'hui.
-    const samedi = samediDeLaSemaine(jour);
+    const samedi = prochaineSeance(jour, reglages);
     const moisSamedi = samedi.slice(0, 7);
     const situationSamedi =
-      samedi === jour ? situationMembres : await construireSituation(moisSamedi, samedi);
+      samedi === jour ? situationMembres : await construireSituation(requete.db, moisSamedi, samedi);
 
     const raccourcis = {
       // Qui peut fouler le terrain aujourd'hui : même cascade que /api/seance.
@@ -235,7 +240,7 @@ routeur.get('/', async (requete, reponse) => {
       total_membres_seance: situationMembres.length,
     };
 
-    const situation = await calculerSoldeReel();
+    const situation = await calculerSoldeReel(requete.db);
     const nombreAJour = membres.filter((membre) => membre.paid).length;
     const moisCourant = new Date().toISOString().slice(0, 7); // format AAAA-MM
     const montantEncaisse = membres.reduce((somme, membre) => somme + membre.montant_total, 0);

@@ -31,7 +31,6 @@
 'use strict';
 
 const express = require('express');
-const { lireUne, lireToutes } = require('../db');
 const { lireAnnee, MOIS } = require('./historique');
 const { CATEGORIES } = require('./demandes');
 const { estRegularisation } = require('./cotisations');
@@ -140,7 +139,7 @@ routeur.get('/', async (requete, reponse) => {
   try {
     // Une seule union : les événements doivent être triés ensemble, pas
     // concaténés par table puis retriés à la main.
-    const lignes = await lireToutes(
+    const lignes = await requete.db.lireToutes(
       `
       SELECT * FROM (
         -- Cotisations tranchées par le trésorier
@@ -333,7 +332,7 @@ routeur.get('/', async (requete, reponse) => {
 
     // Le solde d'ouverture ne vit pas dans une table d'événements : on l'ajoute
     // à sa place chronologique s'il tombe dans l'année demandée.
-    const ouverture = await lireUne(
+    const ouverture = await requete.db.lireUne(
       "SELECT valeur, definit_par, date_maj FROM parametres WHERE cle = 'solde_ouverture'"
     );
     if (ouverture && ouverture.valeur) {
