@@ -13,6 +13,10 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS members (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   name          TEXT NOT NULL UNIQUE,
+  -- LOT 7 : numéro de téléphone, au format +237XXXXXXXXX. Il n'est pas
+  -- décoratif : la réinitialisation d'un code par SMS n'a pas d'autre point
+  -- d'accroche, et un rôle ne peut être attribué qu'à un membre qui en a un.
+  telephone     TEXT,
   -- LOT 4 : voir le bloc « Date d'adhésion, statut du membre » en fin de fichier.
   date_adhesion DATE,
   -- LOT 4 bis : la cotisation mensuelle n'est PAS uniforme. Certains membres
@@ -295,3 +299,114 @@ CREATE TABLE IF NOT EXISTS evenements_membres (
 
 CREATE INDEX IF NOT EXISTS idx_evenements_membres_membre ON evenements_membres (member_id);
 CREATE INDEX IF NOT EXISTS idx_evenements_membres_date ON evenements_membres (date_evenement);
+
+-- ---------------------------------------------------------------------------
+-- LOT 7 « DeuxZero » — Codes de rôle tenus par l'association
+--
+-- Jusqu'ici les codes de rôle vivaient dans le .env du serveur : un seul jeu de
+-- codes pour une seule association. Un produit vendu à des dizaines
+-- d'associations ne peut pas fonctionner ainsi — et l'éditeur n'entre jamais en
+-- contact avec elles, donc personne ne peut éditer un fichier à leur place.
+--
+-- Les codes sont donc dans la base DE L'ASSOCIATION, et seulement HACHÉS. Le
+-- code en clair n'existe qu'à deux instants : celui où il est tiré au sort et
+-- affiché une seule fois, et celui où son porteur le saisit. Aucune route,
+-- aucun export, aucun journal ne peut le restituer — le président lui-même ne
+-- connaît pas le code définitif de ses collaborateurs.
+--
+--   role            fonction ouverte par ce code
+--   membre_id       titulaire ; NULL pour un code non encore rattaché
+--   libelle         nom d'usage affiché (« Trésorier Junior »)
+--   code_hash       « scrypt$N$r$p$sel$empreinte », cf. src/services/codes.js
+--   temporaire      1 = code de passation, à usage unique, qui EXIGE le choix
+--                   d'un code personnel à la première connexion
+--   expire_le       échéance d'un code temporaire (24 h) ; NULL pour un définitif
+--   actif           0 = révoqué ou consommé ; une ligne n'est jamais supprimée,
+--                   l'historique des accès doit rester lisible
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS roles_codes (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  role                 TEXT NOT NULL
+                         CHECK (role IN ('president', 'secretaire', 'tresorier',
+                                         'censeur', 'intendant', 'competitions')),
+  membre_id            INTEGER,
+  libelle              TEXT,
+  code_hash            TEXT NOT NULL,
+  temporaire           INTEGER NOT NULL DEFAULT 0,
+  expire_le            DATETIME,
+  actif                INTEGER NOT NULL DEFAULT 1,
+  cree_le              DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+  derniere_utilisation DATETIME,
+  FOREIGN KEY (membre_id) REFERENCES members (id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_roles_codes_actif ON roles_codes (actif, role);
+CREATE INDEX IF NOT EXISTS idx_roles_codes_membre ON roles_codes (membre_id);
+
+-- ---------------------------------------------------------------------------
+-- LOT 7 — Réinitialisations par SMS
+--
+-- Un membre du bureau qui perd son code se dépanne seul. Ce mécanisme est aussi
+-- une porte d'entrée potentielle et une facture SMS : chaque tentative est
+-- inscrite ici, c'est sur cette table que reposent les trois quotas (3 par mois
+-- et par association, 5 échecs → blocage d'une heure, expiration à 15 minutes).
+--
+-- Le téléphone est enregistré en clair — il faut pouvoir compter les tentatives
+-- d'un numéro — mais il n'est JAMAIS journalisé autrement que masqué
+-- (+237******789), et le code SMS n'est stocké que haché.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS reinitialisations (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  telephone     TEXT NOT NULL,
+  role_id       INTEGER,
+  role          TEXT,
+  code_hash     TEXT,
+  expire_le     DATETIME,
+  tentatives    INTEGER NOT NULL DEFAULT 0,
+  bloque_jusqua DATETIME,
+  resultat      TEXT NOT NULL DEFAULT 'demandee'
+                  CHECK (resultat IN ('demandee', 'confirmee', 'expiree',
+                                      'bloquee', 'refusee', 'hors_quota')),
+  adresse_ip    TEXT,
+  date_demande  DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+  date_fin      DATETIME
+);
+
+CREATE INDEX IF NOT EXISTS idx_reinitialisations_tel ON reinitialisations (telephone, date_demande);
+CREATE INDEX IF NOT EXISTS idx_reinitialisations_date ON reinitialisations (date_demande);
+
+-- ---------------------------------------------------------------------------
+-- LOT 7 — Réinitialisation du code président : le contre-seing
+--
+-- Il n'y a personne au-dessus du président : aucune autorité ne peut attester
+-- que la demande vient bien de lui. La garantie est donc COLLÉGIALE — deux
+-- autres titulaires de rôle doivent confirmer dans les 24 heures, sans quoi la
+-- demande expire silencieusement.
+--
+-- Les confirmations vivent dans leur propre table : « deux titulaires » veut
+-- dire deux PERSONNES DIFFÉRENTES, et un simple compteur laisserait le même
+-- collaborateur confirmer deux fois.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS demandes_president (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  demandeur      TEXT NOT NULL,          -- téléphone du président, masqué en journal
+  confirmations  INTEGER NOT NULL DEFAULT 0,
+  etat           TEXT NOT NULL DEFAULT 'en_attente'
+                   CHECK (etat IN ('en_attente', 'confirmee', 'expiree', 'annulee')),
+  adresse_ip     TEXT,
+  date_demande   DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+  expire_le      DATETIME NOT NULL,
+  date_fin       DATETIME
+);
+
+CREATE TABLE IF NOT EXISTS confirmations_president (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  demande_id   INTEGER NOT NULL,
+  role_id      INTEGER NOT NULL,
+  role         TEXT,
+  date_confirmation DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+  UNIQUE (demande_id, role_id),
+  FOREIGN KEY (demande_id) REFERENCES demandes_president (id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_demandes_president_etat ON demandes_president (etat, expire_le);
