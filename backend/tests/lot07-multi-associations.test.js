@@ -41,6 +41,9 @@ const { once } = require('node:events');
 const DOSSIER = path.join(os.tmpdir(), `deuxzero-test-lot07-${process.pid}`);
 process.env.DATA_DIR = DOSSIER;
 process.env.NODE_ENV = 'test';
+// src/index.js est requis pour son application Express seule : ce drapeau lui dit
+// de ne pas ouvrir sa propre ecoute, le test montant la sienne sur un port libre.
+process.env.SERVEUR_SANS_ECOUTE = '1';
 process.env.SMS_FOURNISSEUR = 'journal';
 process.env.ADMIN_PRODUIT_CODE = 'editeur-de-test';
 // Le plafond de creations par adresse IP protege la production contre un script

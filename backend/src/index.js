@@ -254,9 +254,15 @@ process.on('unhandledRejection', (raison) => {
   console.error(`[serveur] promesse rejetée non gérée : ${raison}`);
 });
 
-// Sous test, le fichier est requis pour son application Express seule : démarrer
-// une écoute réelle laisserait le processus de test ouvert indéfiniment.
-if (process.env.NODE_ENV !== 'test') demarrer();
+// Les tests requièrent ce fichier pour son application Express seule, et ouvrent
+// leur propre écoute sur un port libre : démarrer ici en plus laisserait le
+// processus de test ouvert indéfiniment.
+//
+// La condition ne porte PAS sur NODE_ENV. La chaîne d'intégration lance le
+// serveur avec NODE_ENV=test et l'interroge sur /api/health : s'y raccrocher
+// aurait rendu ce contrôle impossible à satisfaire, et la sonde de santé est
+// justement ce qui vérifie que le service démarre vraiment.
+if (process.env.SERVEUR_SANS_ECOUTE !== '1') demarrer();
 
 module.exports = application;
 module.exports.demarrer = demarrer;
