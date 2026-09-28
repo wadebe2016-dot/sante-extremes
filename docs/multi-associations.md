@@ -52,18 +52,97 @@ expose plus : un `require('../db')` qui chercherait `executer` échoue au
 démarrage, ce qui est voulu — une base globale oubliée quelque part serait une
 fuite.
 
-**Quatre routes seulement se passent de l'en-tête**, et c'est une liste fermée,
-pas un motif :
+**Seules ces routes se passent de l'en-tête**, et c'est une liste fermée, pas un
+motif :
 
 | Route | Pourquoi |
 |---|---|
-| `GET /api/health` | interroge le service, pas une association |
+| `GET /health` et `GET /api/health` | interrogent le service, pas une association |
 | `POST /api/associations` | le code n'existe pas encore |
 | `POST /api/associations/verifier-code` | le membre cherche justement quel il est |
 | `POST /api/reinitialisation/{demander,confirmer,president}` | l'appelant n'a plus d'application configurée |
 
 Le contre-seing (`/api/reinitialisation/president/confirmer`) **n'en fait pas
 partie** : celui qui contresigne a toujours son code.
+
+La sonde répond sur **les deux chemins**. Les scripts de `deploy/` sondent
+`/api/health`, mais la supervision appelle `/health`, qui n'avait jamais existé
+côté application : elle recevait 404 avant le LOT 7, puis un 400
+« association requise ». Dispenser le chemin de l'en-tête ne suffisait pas — il
+fallait aussi que la route réponde.
+
+---
+
+## 1 bis. `ASSOCIATION_PAR_DEFAUT` — dispositif transitoire
+
+> **Ceci contredit en partie le paragraphe précédent, et c'est assumé.** Sur une
+> instance où cette variable est renseignée, il existe une base « par défaut ».
+
+### Pourquoi
+
+Les applications installées chez les trente-neuf membres de « Santé des
+extrêmes » ont été compilées avant le LOT 7 : elles n'envoient pas
+`X-Association`. À la mise en production, elles ont reçu **400 sur toutes les
+routes métier** — application hors service pour tout le monde. Trente-neuf
+téléphones ne se mettent pas à jour en une soirée.
+
+### Comportement
+
+| Cas | Sans la variable | Avec la variable |
+|---|---|---|
+| en-tête **absent** | **400** `association_requise` | résolu vers `<CODE>`, **avertissement journalisé** |
+| en-tête **présent mais mal formé** | **400** | **400** — inchangé |
+| en-tête **valide** | résolu normalement | résolu normalement, la variable est ignorée |
+| en-tête valide mais code inconnu | **404** | **404** — pas de bascule sur le repli |
+
+La distinction absence / malformation porte tout le dispositif : une application
+antérieure au LOT 7 n'envoie **rien**, tandis qu'un en-tête présent mais illisible
+trahit un défaut d'application. Masquer le second le rendrait introuvable.
+
+**L'étanchéité reste entière** : dès que l'en-tête est fourni, c'est lui qui
+l'emporte. Le repli n'ouvre aucune voie d'une association vers une autre, et les
+tests le vérifient explicitement (`tests/lot07-multi-associations.test.js`).
+
+Une valeur mal formée est traitée comme une absence, et le signale en erreur : une
+variable posée de travers pendant une panne se diagnostique mal.
+
+### Mise en service
+
+```env
+# /opt/deuxzero/backend/.env — sur l'instance UNIQUEMENT
+ASSOCIATION_PAR_DEFAUT=SDE001
+```
+
+```bash
+sudo systemctl restart sde-api
+curl -s -o /dev/null -w '%{http_code}\n' https://sde-api.atlastech.cm/api/stats   # → 200
+```
+
+**La variable ne figure volontairement pas dans `.env.example`** et n'est jamais
+posée par défaut : une installation neuve est stricte, et le repli ne s'active
+jamais de lui-même.
+
+### Condition de suppression
+
+Chaque usage laisse une trace unique et greppable :
+
+```
+[association] repli vers SDE001 (en-tête absent) sur GET /api/stats
+```
+
+```bash
+# Combien d'appels de repli sur les sept derniers jours ?
+journalctl -u sde-api --since '7 days ago' | grep -c 'repli vers'
+```
+
+**Quand ce compte tombe à zéro et y reste, plus aucune application antérieure au
+LOT 7 n'est en service :** retirer la ligne du `.env`, redémarrer, et supprimer le
+code du repli dans `src/middleware/association.js` — la fonction
+`associationParDefaut`, la branche `absent` de `resoudreAssociation`, le drapeau
+`requete.associationParRepli`, ainsi que les tests correspondants.
+
+Tant que le compte n'est pas nul, la migration des clients n'est pas terminée : le
+chiffre dit exactement combien de téléphones restent à mettre à jour.
 
 ---
 

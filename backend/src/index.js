@@ -100,14 +100,23 @@ application.use((requete, reponse, suite) => {
 
 // Sonde de santé (supervision / conteneur). Dispensée d'en-tête : elle interroge
 // le service, pas une association.
-application.get('/api/health', (requete, reponse) => {
+//
+// DEUX CHEMINS pour une seule sonde. Les scripts de déploiement (deploy/) sondent
+// « /api/health » ; la supervision, elle, appelle « /health », qui n'a jamais
+// existé côté application — avant le LOT 7 elle recevait 404, depuis le LOT 7 un
+// 400 « association requise ». Dispenser le chemin de l'en-tête ne suffisait donc
+// pas : il faut aussi que la route réponde.
+function sondeSante(requete, reponse) {
   reponse.status(200).json({
     status: 'ok',
     service: 'deuxzero-backend',
     sms: fournisseurActif(),
     bases_en_cache: locataires.tailleCache(),
   });
-});
+}
+
+application.get('/api/health', sondeSante);
+application.get('/health', sondeSante);
 
 // ---------------------------------------------------------------------------
 // Résolution du locataire — AVANT tout routeur métier.

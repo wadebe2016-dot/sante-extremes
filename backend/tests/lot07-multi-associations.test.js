@@ -270,12 +270,163 @@ test('le président se connecte, ajoute un membre, déclare une cotisation et la
 // Vérification 4 — étanchéité
 // ---------------------------------------------------------------------------
 
-test('sans en-tête X-Association, aucune route métier ne répond', async () => {
+// ---------------------------------------------------------------------------
+// Correctif d'urgence — repli ASSOCIATION_PAR_DEFAUT
+//
+// Les applications installées chez les trente-neuf membres de l'association
+// historique ont été écrites avant le LOT 7 : elles n'envoient pas l'en-tête et
+// recevaient 400 sur TOUTES les routes métier. Trente-neuf téléphones ne se
+// mettent pas à jour en une soirée, d'où ce repli — étroit, tracé, transitoire.
+//
+// Ce que ces tests tiennent, et qui fait toute la valeur du dispositif :
+//   · avec la variable, une requête SANS en-tête aboutit sur l'association visée ;
+//   · sans la variable, elle est refusée en 400 — une installation neuve est
+//     stricte, et le repli ne s'active jamais de lui-même ;
+//   · un en-tête PRÉSENT mais mal formé reste refusé dans les DEUX cas : c'est un
+//     défaut d'application, pas un client ancien ;
+//   · l'étanchéité reste entière dès que l'en-tête est fourni. C'est le point
+//     capital : le repli ne doit pas devenir une porte vers une autre association.
+// ---------------------------------------------------------------------------
+
+/** Exécute [action] avec ASSOCIATION_PAR_DEFAUT posée, puis rétablit l'état. */
+async function avecRepli(code, action) {
+  const precedent = process.env.ASSOCIATION_PAR_DEFAUT;
+  process.env.ASSOCIATION_PAR_DEFAUT = code;
+  try {
+    return await action();
+  } finally {
+    if (precedent === undefined) delete process.env.ASSOCIATION_PAR_DEFAUT;
+    else process.env.ASSOCIATION_PAR_DEFAUT = precedent;
+  }
+}
+
+test('la sonde de santé répond sur les deux chemins, sans en-tête', async () => {
+  for (const chemin of ['/api/health', '/health']) {
+    const reponse = await appeler(chemin);
+    assert.equal(reponse.code, 200, `${chemin} devrait répondre 200 sans en-tête`);
+    assert.equal(reponse.corps.status, 'ok');
+    assert.equal(reponse.corps.service, 'deuxzero-backend');
+  }
+});
+
+test('sans ASSOCIATION_PAR_DEFAUT, une requête sans en-tête reste refusée', async () => {
+  assert.equal(process.env.ASSOCIATION_PAR_DEFAUT, undefined);
+
   for (const chemin of ['/api/stats', '/api/arrieres', '/api/tresorerie', '/api/historique']) {
     const reponse = await appeler(chemin);
     assert.equal(reponse.code, 400, `${chemin} devrait exiger l’en-tête`);
     assert.equal(reponse.corps.code, 'association_requise');
   }
+});
+
+test('avec ASSOCIATION_PAR_DEFAUT, une requête sans en-tête aboutit sur cette association', async () => {
+  // Référence : la même lecture, en-tête fourni.
+  const reference = await appeler('/api/stats', { association: sde.code });
+  assert.equal(reference.code, 200);
+
+  await avecRepli(sde.code, async () => {
+    for (const chemin of ['/api/stats', '/api/arrieres', '/api/tresorerie', '/api/historique']) {
+      const reponse = await appeler(chemin);
+      assert.equal(reponse.code, 200, `${chemin} devrait aboutir par repli`);
+    }
+
+    // Et ce sont bien les données de SDE, pas celles d'une autre association.
+    const sansEntete = await appeler('/api/stats');
+    assert.equal(
+      sansEntete.corps.summary.montant_encaisse,
+      reference.corps.summary.montant_encaisse
+    );
+    assert.equal(sansEntete.corps.summary.total_members, reference.corps.summary.total_members);
+  });
+});
+
+test('le repli journalise un avertissement repérable, pour savoir quand le retirer', async () => {
+  const lignes = [];
+  const original = console.warn;
+  console.warn = (...arguments_) => {
+    lignes.push(arguments_.join(' '));
+    original(...arguments_);
+  };
+
+  try {
+    await avecRepli(sde.code, async () => {
+      const reponse = await appeler('/api/stats');
+      assert.equal(reponse.code, 200);
+    });
+  } finally {
+    console.warn = original;
+  }
+
+  // C'est cette trace exacte qui dira que le dispositif peut disparaître : plus
+  // aucune ligne de ce genre, plus besoin de la variable.
+  const trace = lignes.find((ligne) => ligne.includes('repli vers'));
+  assert.ok(trace, 'aucun avertissement de repli dans les journaux');
+  assert.ok(trace.includes(`repli vers ${sde.code} (en-tête absent)`), trace);
+  assert.ok(trace.includes('GET /api/stats'), trace);
+});
+
+test('un en-tête PRÉSENT mais mal formé est refusé, avec ou sans repli', async () => {
+  // Sans repli.
+  for (const mauvais of ['ABC', 'TROP-LONG-12', 'é!@#$%', ' ABC12 ']) {
+    const reponse = await appeler('/api/stats', { association: mauvais });
+    assert.equal(reponse.code, 400, `« ${mauvais} » devrait être refusé`);
+    assert.equal(reponse.corps.code, 'association_requise');
+  }
+
+  // Avec repli : le refus tient. Un client qui envoie un en-tête sait en envoyer
+  // un bon ; masquer son défaut le rendrait introuvable.
+  await avecRepli(sde.code, async () => {
+    for (const mauvais of ['ABC', 'TROP-LONG-12']) {
+      const reponse = await appeler('/api/stats', { association: mauvais });
+      assert.equal(reponse.code, 400, `« ${mauvais} » devrait rester refusé malgré le repli`);
+      assert.equal(reponse.corps.code, 'association_requise');
+    }
+  });
+});
+
+test('le repli ne perce pas l’étanchéité : l’en-tête fourni l’emporte toujours', async () => {
+  // Repli posé sur SDE, mais chaque requête nomme son association : c'est elle
+  // qui doit être servie, sinon le correctif d'urgence aurait ouvert une brèche
+  // entre deux clients — exactement ce que tout le lot cherche à rendre impossible.
+  await avecRepli(sde.code, async () => {
+    const chezTest = await appeler('/api/stats', { association: testAssoc.code });
+    const chezSde = await appeler('/api/stats', { association: sde.code });
+
+    assert.equal(chezTest.code, 200);
+    assert.equal(chezSde.code, 200);
+    assert.notEqual(
+      chezTest.corps.summary.montant_encaisse,
+      chezSde.corps.summary.montant_encaisse
+    );
+
+    const membresTest = await appeler('/api/admin/members', {
+      code: testAssoc.president,
+      association: testAssoc.code,
+    });
+    assert.equal(membresTest.code, 200);
+    const noms = membresTest.corps.members.map((entree) => entree.name);
+    assert.ok(!noms.includes('Membre Exclusif SDE'), 'le repli laisse fuir un membre de SDE');
+
+    // Un code inconnu reste un 404, il ne retombe pas silencieusement sur le repli.
+    const inconnu = await appeler('/api/stats', { association: 'ZZZ999' });
+    assert.equal(inconnu.code, 404, 'un code inconnu ne doit pas basculer sur le repli');
+    assert.equal(inconnu.corps.code, 'association_inconnue');
+
+    // Et le code d'une association n'ouvre toujours pas l'autre.
+    const croise = await appeler('/api/admin/members', {
+      code: sde.president,
+      association: testAssoc.code,
+    });
+    assert.equal(croise.code, 401, 'le repli a affaibli le cloisonnement des codes');
+  });
+});
+
+test('une ASSOCIATION_PAR_DEFAUT mal formée n’active aucun repli', async () => {
+  await avecRepli('pas-un-code', async () => {
+    const reponse = await appeler('/api/stats');
+    assert.equal(reponse.code, 400, 'une variable invalide ne doit pas activer le repli');
+    assert.equal(reponse.corps.code, 'association_requise');
+  });
 });
 
 test('un code d’association inconnu est refusé en 404, un suspendu en 403', async () => {
