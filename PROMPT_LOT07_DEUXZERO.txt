@@ -1,0 +1,354 @@
+🚀 PROMPT CLAUDE CODE — LOT 7 « DEUXZERO » (MULTI-ASSOCIATIONS)
+TU NE POSES AUCUNE QUESTION. ZÉRO INTERRUPTION. AUTONOMIE COMPLÈTE.
+TU TRAVAILLES JUSQU'À LIVRAISON FINIE : CODE + BUILD + DÉPLOIEMENT + VÉRIFICATION.
+
+========================================
+CONTEXTE
+========================================
+Repos :
+- Backend  : ~/sante-extremes/backend  (branche master)
+- Flutter  : ~/sante-extremes-flutter  (branche main)
+
+Production actuelle :
+- API  : https://sde-api.atlastech.cm  (systemd sde-api, nginx, Let's Encrypt)
+- Web  : https://app.santedesextremes.com
+- Base : SQLite locale data/sde.db (39 membres, 2 100 000 XAF encaissés)
+- S3   : bucket sde-cotisations-paiements via rôle IAM d'instance (AUCUNE clé sur disque)
+
+L'application, aujourd'hui mono-association (« Santé des extrêmes »), devient un
+PRODUIT commercialisable nommé « DeuxZero », publié sur Google Play, destiné aux
+associations sportives du Cameroun (corporations, groupes de collègues qui jouent
+le week-end — communément appelés « 2-0 », comme un score de match).
+
+CONTRAINTE PRODUIT FONDAMENTALE :
+L'éditeur (Atlastech) N'ENTRE JAMAIS EN CONTACT avec les associations.
+L'application doit fonctionner seule : création d'association, attribution des codes,
+réinitialisation des codes perdus — tout est autonome, sans support humain.
+
+RÈGLES ABSOLUES (identiques à tous les lots précédents) :
+- ZÉRO question, zéro demande de confirmation
+- Français partout (UI, commentaires, logs, messages d'erreur)
+- Aucun secret en dur : tout par variables d'environnement
+- Migrations ADDITIVES uniquement : ne rien casser de l'existant
+- Les données de « Santé des extrêmes » ne doivent RIEN perdre
+- Code production-ready : pas de TODO, gestion d'erreur complète, logs [CONTEXTE] message
+
+========================================
+SECTION 1 — ISOLATION MULTI-ASSOCIATIONS
+========================================
+
+Principe : UNE BASE SQLITE PAR ASSOCIATION. Aucune requête ne peut jamais traverser
+la frontière entre deux associations, même en cas de bug applicatif.
+
+1.1 Arborescence des données
+    data/
+      annuaire.db                  ← annuaire global des associations
+      associations/
+        SDE001.db                  ← Santé des extrêmes (migration de l'actuel sde.db)
+        <CODE>.db                  ← une base par association
+
+1.2 Base annuaire.db — table `associations`
+    - id INTEGER PRIMARY KEY
+    - code TEXT UNIQUE NOT NULL          (6 caractères, majuscules+chiffres, ex. SDE001)
+    - nom TEXT NOT NULL
+    - ville TEXT
+    - telephone_president TEXT NOT NULL  (format +237XXXXXXXXX)
+    - date_creation DATETIME DEFAULT CURRENT_TIMESTAMP
+    - statut TEXT DEFAULT 'active'       ('active' | 'suspendue')
+    - fichier_db TEXT NOT NULL           (chemin relatif de la base)
+
+    L'annuaire ne contient AUCUNE donnée métier : ni membre, ni cotisation, ni montant.
+
+1.3 Résolution du locataire (tenant)
+    - Chaque requête API porte l'en-tête `X-Association: <CODE>`
+    - Un middleware `resolveAssociation` :
+        · lit l'en-tête, refuse 400 si absent (sauf routes publiques listées ci-dessous)
+        · cherche le code dans annuaire.db, refuse 404 si inconnu, 403 si statut='suspendue'
+        · ouvre (et met en cache, max 50 connexions LRU) la base de l'association
+        · expose `req.db` et `req.association` au reste de la chaîne
+    - Routes SANS en-tête obligatoire : GET /health, POST /api/associations (création),
+      POST /api/associations/verifier-code, et les routes de réinitialisation SMS.
+    - TOUTES les routes existantes (membres, cotisations, dépenses, sanctions, trésorerie,
+      exports, mesures) utilisent DÉSORMAIS `req.db` et plus jamais une base globale.
+      Fais une passe exhaustive : aucune route ne doit conserver une référence à l'ancien
+      singleton de connexion.
+
+1.4 Migration de l'existant — SANS PERTE
+    Écris `scripts/migrer-vers-multi.js` qui, de façon IDEMPOTENTE :
+      1. crée data/annuaire.db si absente
+      2. insère l'association SDE001 « Santé des extrêmes », ville Douala,
+         téléphone président = celui présent dans la configuration
+      3. copie data/sde.db vers data/associations/SDE001.db (copie, pas déplacement)
+      4. conserve data/sde.db intact en sauvegarde
+      5. vérifie et AFFICHE : nombre de membres, nombre de cotisations, total encaissé,
+         total impayés — les chiffres doivent être strictement identiques à l'avant-migration
+    Le script se relance sans danger et sans dupliquer quoi que ce soit.
+
+1.5 Création d'une association depuis l'application
+    POST /api/associations
+      corps : { nom, ville, telephone_president, nom_president, contribution_defaut }
+      actions :
+        · génère un code unique de 6 caractères (3 lettres issues du nom + 3 chiffres,
+          avec réessai en cas de collision)
+        · crée la base data/associations/<CODE>.db avec le schéma complet à jour
+        · crée le membre « président » avec son nom et son téléphone
+        · génère le code président initial : 8 caractères lisibles (sans I, l, 1, O, 0)
+        · renvoie { code_association, code_president, nom }
+      Le code président n'est affiché QU'UNE FOIS, à cet instant précis.
+      Il est stocké haché, jamais en clair.
+
+========================================
+SECTION 2 — RÔLES ET CODES GÉRÉS PAR LE PRÉSIDENT
+========================================
+
+2.1 Renommage du rôle
+    Le rôle `admin` devient `président` partout : base, code, UI, exports, documentation.
+    Prévois une compatibilité ascendante silencieuse : un jeton portant l'ancien rôle
+    `admin` est accepté et traité comme `président`.
+
+2.2 Sortie des codes du fichier .env
+    Les codes de rôle NE SONT PLUS dans .env. Nouvelle table, dans CHAQUE base d'association :
+
+    roles_codes
+      - id INTEGER PRIMARY KEY
+      - role TEXT NOT NULL             ('president','secretaire','tresorier','censeur',
+                                        'intendant','competitions')
+      - membre_id INTEGER              (titulaire, référence members.id, nullable)
+      - libelle TEXT                   (ex. « Trésorier Junior »)
+      - code_hash TEXT NOT NULL        (bcrypt ou scrypt, coût raisonnable)
+      - temporaire INTEGER DEFAULT 0   (1 = code provisoire à usage unique)
+      - expire_le DATETIME             (renseigné si temporaire)
+      - actif INTEGER DEFAULT 1
+      - cree_le DATETIME DEFAULT CURRENT_TIMESTAMP
+      - derniere_utilisation DATETIME
+
+    L'authentification compare le code présenté à tous les hachages actifs de
+    l'association, en temps constant, puis met à jour derniere_utilisation.
+    Le limiteur de tentatives existant (5 échecs / 15 min → 429) reste en place et
+    s'applique désormais PAR ASSOCIATION.
+
+2.3 Migration des codes actuels
+    Le script de migration lit les codes présents dans le .env de SDE001, les insère
+    hachés dans roles_codes avec le bon rôle et le bon titulaire, puis LES SUPPRIME du .env.
+    Les codes actuellement distribués aux membres du bureau CONTINUENT DE FONCTIONNER
+    à l'identique. Aucun membre du bureau ne doit être dérangé par ce lot.
+
+2.4 Attribution d'un rôle par le président — le code définitif reste privé
+    Le président seul peut :
+      POST   /api/roles              { role, membre_id, libelle } → génère un CODE TEMPORAIRE
+      GET    /api/roles              liste des rôles, titulaires, état (sans jamais les codes)
+      DELETE /api/roles/:id          révoque un rôle
+      POST   /api/roles/:id/renouveler → nouveau code temporaire
+
+    Le CODE TEMPORAIRE :
+      · 8 caractères lisibles, valable 24 heures, à USAGE UNIQUE
+      · le président le transmet au collaborateur (WhatsApp, de vive voix, peu importe)
+      · à la première connexion avec ce code, l'application EXIGE immédiatement le choix
+        d'un code personnel (6 à 12 caractères), avant tout accès aux écrans
+      · le code temporaire est alors désactivé définitivement
+
+    CONSÉQUENCE À RESPECTER STRICTEMENT :
+    le président ne connaît JAMAIS le code définitif de ses collaborateurs.
+    Aucune route, aucun écran, aucun export ne permet d'afficher un code en clair.
+
+2.5 Changement volontaire de code
+    POST /api/roles/mon-code  { ancien_code, nouveau_code }
+    Accessible à tout titulaire d'un rôle, pour lui-même uniquement.
+
+========================================
+SECTION 3 — RÉINITIALISATION PAR SMS
+========================================
+
+Objectif : un membre du bureau qui a perdu son code se dépanne seul, sans contacter
+l'éditeur ni le président, mais sans que ce mécanisme devienne une porte d'entrée.
+
+3.1 Numéros de téléphone
+    Ajoute `members.telephone` (format +237XXXXXXXXX, validé).
+    Un rôle ne peut être attribué qu'à un membre disposant d'un téléphone renseigné.
+
+3.2 Parcours de réinitialisation d'un collaborateur
+    POST /api/reinitialisation/demander   { code_association, telephone }
+      · vérifie que ce téléphone correspond bien à un titulaire de rôle actif
+      · envoie par SMS un code temporaire à 6 chiffres, valable 15 minutes
+      · réponse volontairement neutre (ne révèle jamais si le numéro existe)
+    POST /api/reinitialisation/confirmer  { code_association, telephone, code_sms, nouveau_code }
+      · valide, puis remplace le code du rôle par le nouveau code choisi
+      · journalise l'opération
+
+3.3 Quotas — protection contre l'abus et contre la facture SMS
+    · 3 réinitialisations par mois et par association, tous rôles confondus
+    · 5 tentatives erronées de code SMS → blocage de 1 heure pour ce numéro
+    · le code SMS expire en 15 minutes ; un code temporaire de rôle expire en 24 heures
+    · au-delà du quota mensuel : message clair invitant à demander un nouveau code
+      temporaire au président (qui, lui, n'est jamais bloqué pour cette action)
+    Table `reinitialisations` dans chaque base : date, téléphone (masqué en journal :
+    +237******789), rôle concerné, résultat, adresse IP.
+
+3.4 Cas particulier : le président a perdu son code
+    Il n'y a personne au-dessus de lui : la récupération exige un CONTRE-SEING.
+      POST /api/reinitialisation/president  { code_association, telephone }
+        · vérifie que le téléphone est bien celui du président dans l'annuaire
+        · envoie un SMS aux DEUX autres titulaires de rôle les plus anciens
+          (secrétaire et trésorier en priorité) : « <Nom> demande la réinitialisation
+          du code président de <Association>. Répondez dans l'application pour confirmer. »
+        · la demande n'aboutit QUE si DEUX titulaires confirment dans les 24 heures
+      POST /api/reinitialisation/president/confirmer  (authentifié par un rôle actif)
+        · enregistre une confirmation ; à la deuxième, un code temporaire est envoyé
+          par SMS au président
+    Table `demandes_president` : demandeur, date, confirmations, état, expiration.
+    Sans deux confirmations dans les 24 heures, la demande expire silencieusement.
+
+========================================
+SECTION 4 — COUCHE D'ENVOI SMS (INFOBIP + NEXAH + JOURNAL)
+========================================
+
+4.1 Interface unique
+    Crée `src/services/sms/index.js` exposant :
+      envoyerSms({ destinataire, message, association })
+        → { succes: bool, identifiant: string|null, erreur: string|null }
+    Le fournisseur est choisi par la variable d'environnement `SMS_FOURNISSEUR`.
+    Changer de routeur = modifier une ligne du .env + redémarrer le service. Rien d'autre.
+
+4.2 Implémentation `infobip` (ACTIVE PAR DÉFAUT)
+    Fichier src/services/sms/infobip.js
+    Variables : INFOBIP_BASE_URL, INFOBIP_API_KEY, INFOBIP_EXPEDITEUR
+    Appel POST {BASE_URL}/sms/2/text/advanced
+      en-tête Authorization: App {API_KEY}
+      corps : { messages: [ { destinations:[{to}], from, text } ] }
+    Gère : délai d'attente 10 s, 2 réessais avec repli exponentiel, journalisation du
+    messageId retourné, erreurs réseau capturées sans faire tomber le serveur.
+
+4.3 Implémentation `nexah` (PRÊTE, NON ACTIVE)
+    Fichier src/services/sms/nexah.js
+    Variables : NEXAH_BASE_URL, NEXAH_UTILISATEUR, NEXAH_MOT_DE_PASSE, NEXAH_EXPEDITEUR
+    Implémente l'envoi selon l'API HTTP de Nexah (user, password, senderid, mobiles, sms),
+    avec la MÊME signature de fonction et le MÊME format de retour qu'Infobip.
+    Si une variable manque, le module renvoie une erreur explicite sans planter le service.
+    Documente dans docs/sms.md les trois lignes à changer pour basculer vers Nexah.
+
+4.4 Implémentation `journal` (tests et recette)
+    Fichier src/services/sms/journal.js — n'envoie rien, écrit le SMS dans les logs et
+    renvoie un succès simulé. Utilisée quand SMS_FOURNISSEUR=journal.
+
+4.5 Traçabilité et coût
+    Table `sms_envoyes` dans annuaire.db : association, destinataire masqué, motif,
+    fournisseur, identifiant, succès, date. Permet de suivre la consommation réelle.
+    Ajoute GET /api/admin-produit/sms/statistiques (protégé par ADMIN_PRODUIT_CODE en .env,
+    réservé à l'éditeur) : volume par association et par mois.
+
+========================================
+SECTION 5 — PARAMÈTRES PROPRES À CHAQUE ASSOCIATION
+========================================
+
+Table `parametres` (clé/valeur) dans chaque base, avec valeurs par défaut :
+  - jour_seance                = 'samedi'
+  - fenetre_cotisation_debut   = 1        (jour du mois)
+  - fenetre_cotisation_fin     = 5
+  - contribution_defaut        = 10000
+  - penalite_un_mois           = 1000
+  - penalite_deux_mois         = 2000
+  - seuil_exclusion_mois       = 3
+  - devise                     = 'XAF'
+  - postes_depenses            = liste JSON, modifiable par le président
+  - fiches_sante_actives       = 0        ← DÉSACTIVÉ PAR DÉFAUT (données sensibles :
+                                            chaque association l'active en connaissance de cause)
+
+Routes : GET /api/parametres (tout rôle) et PUT /api/parametres (président seul).
+Écran Flutter « Paramètres de l'association », réservé au président.
+
+TOUT le code métier existant doit LIRE CES PARAMÈTRES au lieu des valeurs codées en dur :
+les mesures automatiques, le calcul des impayés, la liste d'éligibilité aux séances,
+les montants de pénalité, les postes de dépense. Fais une revue complète du backend
+pour éliminer chaque constante en dur remplacée par un paramètre.
+Pour SDE001, les valeurs par défaut reproduisent EXACTEMENT le comportement actuel.
+
+========================================
+SECTION 6 — IDENTITÉ « DEUXZERO » CÔTÉ FLUTTER
+========================================
+
+6.1 Identité applicative
+    - Nom affiché : DeuxZero
+    - Package Android : cm.atlastech.deuxzero
+    - applicationId, label, et libellés de l'interface mis à jour partout
+    - Tout texte figeant « Santé des extrêmes » disparaît du code : le nom de
+      l'association vient désormais de l'API
+    - Conserve la typographie Manrope et le style premium validé au LOT 3
+    - Icône : conserve l'icône actuelle tant qu'aucun visuel DeuxZero n'est fourni
+
+6.2 Premier lancement
+    Écran d'accueil offrant deux voies :
+      [ Rejoindre une association ]  → saisie du code à 6 caractères, vérification
+                                        via POST /api/associations/verifier-code,
+                                        affichage du nom pour confirmation
+      [ Créer une association ]      → formulaire : nom, ville, nom et téléphone du
+                                        président, contribution par défaut
+                                        → écran de remise du code association et du
+                                          code président, avec bouton « Copier » et
+                                          avertissement : ce code ne sera plus affiché
+    Le code d'association est mémorisé dans shared_preferences et envoyé dans
+    l'en-tête X-Association à chaque appel. Un bouton « Changer d'association »
+    figure dans les réglages.
+
+6.3 Première connexion avec un code temporaire
+    Si l'API signale un code temporaire, l'application impose immédiatement un écran
+    « Choisissez votre code personnel » (saisie + confirmation, 6 à 12 caractères).
+    Aucun autre écran n'est accessible avant ce choix.
+
+6.4 Écran « Codes perdus »
+    Accessible depuis l'écran de connexion :
+      · saisie du téléphone → SMS → saisie du code reçu → choix du nouveau code
+      · cas président : écran expliquant l'attente des deux confirmations
+      · messages en français clair, sans jargon technique, sans mention d'erreur serveur
+
+6.5 Écran président « Rôles et accès »
+    Liste des rôles, titulaire, date de dernière utilisation, état.
+    Actions : attribuer, renouveler (génère un code temporaire affiché une fois),
+    révoquer. Jamais d'affichage de code définitif.
+
+6.6 Builds
+    Produis l'APK arm64 signé et le build web, et déploie le web sur l'hôte existant
+    sans interrompre app.santedesextremes.com pour les membres actuels.
+
+========================================
+SECTION 7 — VÉRIFICATIONS OBLIGATOIRES AVANT DE DÉCLARER LE LOT FINI
+========================================
+
+Exécute réellement ces contrôles et consigne les résultats :
+
+ 1. Migration : les 39 membres, 2 100 000 XAF encaissés et 555 000 XAF d'impayés de
+    SDE001 sont retrouvés à l'identique après migration.
+ 2. Les codes de rôle actuellement distribués au bureau fonctionnent toujours.
+ 3. Création d'une association de test « TEST01 » : le président obtient son code,
+    se connecte, ajoute un membre, déclare une cotisation, la valide.
+ 4. Étanchéité : une requête portant X-Association: TEST01 ne voit AUCUNE donnée de
+    SDE001, et réciproquement. Teste explicitement sur membres, cotisations, dépenses,
+    trésorerie et exports.
+ 5. Code temporaire : usage unique confirmé, expiration à 24 h confirmée, changement
+    de code obligatoire à la première connexion confirmé.
+ 6. Réinitialisation SMS en mode SMS_FOURNISSEUR=journal : parcours complet, quota de
+    3 par mois effectivement bloquant, blocage d'une heure après 5 échecs effectif.
+ 7. Réinitialisation président : une seule confirmation ne suffit pas ; deux suffisent.
+ 8. Bascule Infobip → Nexah → journal par simple changement de SMS_FOURNISSEUR :
+    le service redémarre et fonctionne dans les trois cas.
+ 9. Paramètres : modifier penalite_un_mois sur TEST01 ne change rien sur SDE001.
+10. Aucun code de rôle en clair nulle part : ni base, ni logs, ni réponse API, ni export.
+11. APK installé et testé : premier lancement, rejoindre une association, connexion.
+12. app.santedesextremes.com reste opérationnel pour les membres actuels.
+
+========================================
+SECTION 8 — LIVRAISON
+========================================
+
+- Commits atomiques en français, poussés sur les branches habituelles
+- Déploiement effectif sur l'instance EC2, service sde-api redémarré et vérifié
+- APK arm64 déposé à un emplacement clairement indiqué
+- docs/sms.md : configuration Infobip, bascule vers Nexah, variables d'environnement
+- docs/multi-associations.md : architecture, création d'association, cycle de vie des codes
+- .env.example mis à jour (aucune valeur réelle)
+
+- ENFIN ET SURTOUT : docs/etat-lot07.md — « Résumé pour l'architecte », 10 LIGNES MAXIMUM,
+  indiquant ce qui a été livré, les résultats chiffrés des 12 vérifications, et tout
+  point resté en suspens. Ce fichier est mon seul canal de retour : je ne peux pas
+  copier le texte de ta session. Sois factuel et complet en 10 lignes.
+
+COMMENCE MAINTENANT. ZÉRO QUESTION. LIVRE LE LOT 7 COMPLET ET VÉRIFIÉ.
